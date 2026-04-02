@@ -382,10 +382,41 @@ def _dedup_brands(brands: list[dict]) -> list[dict]:
     return list(seen.values())
 
 
-def _extract_brands(response_text: str) -> list[dict]:
+def _normalize_against_known_brands(
+    brands: list[dict],
+    known_brands: list[str],
+    canonical_map: dict[str, str],
+    threshold: int = 85,
+) -> list[dict]:
+    """
+    Per ogni brand estratto, cerca il match più vicino in known_brands usando
+    RapidFuzz token_sort_ratio. Se score >= threshold, rimappa al canonical_name
+    del progetto (o brand_name se canonical_name è NULL). Ri-applica dedup dopo
+    la rimappatura per collassare eventuali varianti sullo stesso canonical.
+    """
+    from rapidfuzz import process, fuzz
+
+    normalized = []
+    for b in brands:
+        name = b["brand_name"]
+        result = process.extractOne(name, known_brands, scorer=fuzz.token_sort_ratio)
+        if result is not None:
+            match, score, _ = result
+            if score >= threshold:
+                b = {**b, "brand_name": canonical_map[match]}
+        normalized.append(b)
+
+    return _dedup_brands(normalized)
+
+
+def _extract_brands(
+    response_text: str,
+    project_brands: list[dict] | None = None,
+) -> list[dict]:
     """
     Call gpt-4o-mini to extract brands from response_text.
     Returns list of {"brand_name": str, "position": int}.
+    If project_brands is provided, applies fuzzy normalization against known brands.
     """
     if not tomllib:
         logger.error("tomllib/tomli not available — brand extraction disabled")
@@ -429,6 +460,18 @@ def _extract_brands(response_text: str) -> list[dict]:
             if b.get("name")
         ]
         brands = _dedup_brands(brands)
+
+        if project_brands:
+            canonical_map = {
+                row["brand_name"]: row.get("canonical_name") or row["brand_name"]
+                for row in project_brands
+            }
+            brands = _normalize_against_known_brands(
+                brands,
+                known_brands=list(canonical_map.keys()),
+                canonical_map=canonical_map,
+            )
+
         logger.info("Brand extraction found %d brands: %s", len(brands), [b["brand_name"] for b in brands])
         return brands
     except Exception as exc:
@@ -559,6 +602,7 @@ def _worker(
     country: str,
     language: str,
     delay: float,
+    project_brands: list[dict] | None = None,
 ) -> None:
     """Execute one (question × LLM) unit of work."""
     try:
@@ -586,7 +630,7 @@ def _worker(
         # --- Extract sources and brands (only for valid responses) ---
         if _is_valid_response(response_text):
             _db_insert_sources(response_id, sources)
-            brands = _extract_brands(response_text)
+            brands = _extract_brands(response_text, project_brands=project_brands)
             _db_insert_brands(response_id, brands)
 
         _db_complete_worker(worker_id, "completed")
@@ -647,6 +691,13 @@ def start_run(
     language = str(proj_df.iloc[0]["language"])
     country = str(proj_df.iloc[0]["country"])
 
+    # --- Load project brands for fuzzy normalization (once, shared across workers) ---
+    pb_df = run_query(
+        "SELECT brand_name, canonical_name FROM project_brands WHERE project_id = %(pid)s",
+        {"pid": project_id},
+    )
+    project_brands_list: list[dict] = pb_df.to_dict("records") if not pb_df.empty else []
+
     total = len(questions_df) * len(llms)
 
     # --- Create run record ---
@@ -690,7 +741,7 @@ def start_run(
             fut = executor.submit(
                 _worker,
                 run_id, worker_id, ai_question_id, question,
-                llm, country, language, delay,
+                llm, country, language, delay, project_brands_list,
             )
             futures[fut] = worker_id
 
@@ -746,6 +797,23 @@ def retry_failed_workers(
     language = str(proj_df.iloc[0]["language"]) if not proj_df.empty else "en"
     country = str(proj_df.iloc[0]["country"]) if not proj_df.empty else "us"
 
+    # --- Load project brands for fuzzy normalization ---
+    if not proj_df.empty:
+        proj_id_for_brands = run_query(
+            "SELECT p.id FROM runs r JOIN projects p ON p.id = r.project_id WHERE r.id = %(rid)s",
+            {"rid": run_id},
+        )
+        if not proj_id_for_brands.empty:
+            pb_df = run_query(
+                "SELECT brand_name, canonical_name FROM project_brands WHERE project_id = %(pid)s",
+                {"pid": str(proj_id_for_brands.iloc[0]["id"])},
+            )
+            project_brands_list: list[dict] = pb_df.to_dict("records") if not pb_df.empty else []
+        else:
+            project_brands_list = []
+    else:
+        project_brands_list = []
+
     total = len(failed_df)
 
     # Create new worker records
@@ -780,7 +848,7 @@ def retry_failed_workers(
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
             executor.submit(
-                _worker, run_id, wid, qid, question, llm, country, language, delay
+                _worker, run_id, wid, qid, question, llm, country, language, delay, project_brands_list
             ): wid
             for wid, qid, question, llm in new_workers
         }

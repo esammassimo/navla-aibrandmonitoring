@@ -378,9 +378,9 @@ if is_admin:
 
         # Build Section A base dataframe (saved + pending)
         if not brands_df.empty:
-            edit_df = brands_df[["brand_name", "is_competitor", "is_own_brand", "is_excluded"]].copy()
+            edit_df = brands_df[["brand_name", "is_competitor", "is_own_brand", "is_excluded", "canonical_name"]].copy()
         else:
-            edit_df = pd.DataFrame(columns=["brand_name", "is_competitor", "is_own_brand", "is_excluded"])
+            edit_df = pd.DataFrame(columns=["brand_name", "is_competitor", "is_own_brand", "is_excluded", "canonical_name"])
 
         if pending_rows:
             existing_lower = set(edit_df["brand_name"].str.lower())
@@ -412,6 +412,10 @@ if is_admin:
                 "is_competitor": st.column_config.CheckboxColumn("Competitor?"),
                 "is_own_brand":  st.column_config.CheckboxColumn("Brand proprio?"),
                 "is_excluded":   st.column_config.CheckboxColumn("Escludi?"),
+                "canonical_name": st.column_config.TextColumn(
+                    "Nome canonico (opzionale)",
+                    help="Se compilato, questo brand e le sue varianti fuzzy-matched verranno salvati con questo nome",
+                ),
             },
             num_rows="dynamic",
             use_container_width=True,
@@ -485,6 +489,7 @@ if is_admin:
                                 "is_competitor": bool(r["is_competitor"]),
                                 "is_own_brand":  bool(r["is_own_brand"]),
                                 "is_excluded":   False,
+                                "canonical_name": None,
                             }
                             for _, r in to_add.iterrows()
                             if str(r["brand_name"]).lower() not in existing_lower
@@ -505,6 +510,11 @@ if is_admin:
             valid["is_competitor"] = valid["is_competitor"].fillna(False).astype(bool)
             valid["is_own_brand"]  = valid["is_own_brand"].fillna(False).astype(bool)
             valid["is_excluded"]   = valid["is_excluded"].fillna(False).astype(bool)
+            valid["canonical_name"] = valid["canonical_name"].where(
+                valid["canonical_name"].astype(str).str.strip().ne("") &
+                valid["canonical_name"].notna(),
+                other=None,
+            )
 
             conflicting = valid[valid["is_competitor"] & valid["is_own_brand"]]["brand_name"].tolist()
             if conflicting:
