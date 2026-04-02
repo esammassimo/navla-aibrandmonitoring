@@ -1,0 +1,21 @@
+[theme]
+base                            = "dark"
+backgroundColor                 = "#202124"
+secondaryBackgroundColor        = "#2c2c2c"
+primaryColor                    = "#f0b910"
+textColor                       = "#e8e8e8"
+borderColor                     = "#4d4d50"
+linkColor                       = "#f0b910"
+font                            = "Noto Sans:https://fonts.googleapis.com/css2?family=Noto+Sans:ital,wght@0,100..900;1,100..900&display=swap, sans-serif"
+headingFont                     = "Noto Sans:https://fonts.googleapis.com/css2?family=Noto+Sans:ital,wght@0,100..900;1,100..900&display=swap, sans-serif"
+baseRadius                      = "medium"
+buttonRadius                    = "medium"
+showWidgetBorder                = true
+dataframeHeaderBackgroundColor  = "#4a3f2a"
+chartCategoricalColors          = ["#f0b910", "#c99a0f", "#a67d0c", "#7a5c09", "#4a3f2a"]
+
+[theme.sidebar]
+backgroundColor          = "#2c2c2c"
+secondaryBackgroundColor = "#202124"
+primaryColor             = "#f0b910"
+borderColor              = "#4d4d50"

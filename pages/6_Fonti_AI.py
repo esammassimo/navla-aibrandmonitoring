@@ -14,7 +14,6 @@ from utils import (
     require_login,
 )
 
-st.set_page_config(page_title="Fonti AI", layout="wide")
 cookie_manager = get_cookie_manager()
 require_login(cookie_manager)
 filters: FilterState = render_sidebar(cookie_manager)

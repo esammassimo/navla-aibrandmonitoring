@@ -23,7 +23,6 @@ from utils import (
     update_ai_question_status,
 )
 
-st.set_page_config(page_title="Domande e Keyword", layout="wide")
 cookie_manager = get_cookie_manager()
 require_login(cookie_manager)
 render_sidebar(cookie_manager)

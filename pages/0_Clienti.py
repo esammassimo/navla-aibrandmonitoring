@@ -24,7 +24,6 @@ from utils import (
     update_project,
 )
 
-st.set_page_config(page_title="Clienti", layout="wide")
 cookie_manager = get_cookie_manager()
 require_login(cookie_manager)
 render_sidebar(cookie_manager)

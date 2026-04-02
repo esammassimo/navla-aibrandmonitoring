@@ -11,18 +11,17 @@ import requests
 import streamlit as st
 
 from utils import (
-    get_cookie_manager,
     create_project,
+    get_cookie_manager,
     insert_keywords,
     insert_ai_questions,
-    upsert_project_brands,
-    upsert_project_schedule,
     render_sidebar,
     require_login,
+    upsert_project_brands,
+    upsert_project_schedule,
     run_query,
 )
 
-st.set_page_config(page_title="Nuovo Progetto", layout="wide")
 cookie_manager = get_cookie_manager()
 require_login(cookie_manager)
 render_sidebar(cookie_manager)
