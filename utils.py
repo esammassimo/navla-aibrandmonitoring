@@ -379,7 +379,7 @@ def fetch_ai_questions(project_id: str, status: Optional[str] = None) -> pd.Data
 @st.cache_data(ttl=60)
 def fetch_project_brands(project_id: str) -> pd.DataFrame:
     return run_query(
-        "SELECT id, brand_name, is_competitor, is_own_brand, created_at "
+        "SELECT id, brand_name, is_competitor, is_own_brand, is_excluded, created_at "
         "FROM project_brands WHERE project_id = %(pid)s ORDER BY brand_name",
         {"pid": project_id},
     )
@@ -598,17 +598,19 @@ def upsert_project_brands(project_id: str, brands: list[dict]) -> None:
         for b in brands:
             conn.execute(
                 text(
-                    "INSERT INTO project_brands (project_id, brand_name, is_competitor, is_own_brand) "
-                    "VALUES (:pid, :name, :comp, :own) "
+                    "INSERT INTO project_brands (project_id, brand_name, is_competitor, is_own_brand, is_excluded) "
+                    "VALUES (:pid, :name, :comp, :own, :excl) "
                     "ON CONFLICT (project_id, brand_name) "
                     "DO UPDATE SET is_competitor = EXCLUDED.is_competitor, "
-                    "              is_own_brand  = EXCLUDED.is_own_brand"
+                    "              is_own_brand  = EXCLUDED.is_own_brand, "
+                    "              is_excluded   = EXCLUDED.is_excluded"
                 ),
                 {
                     "pid":  project_id,
                     "name": b["brand_name"],
                     "comp": b.get("is_competitor", False),
                     "own":  b.get("is_own_brand", False),
+                    "excl": b.get("is_excluded", False),
                 },
             )
 

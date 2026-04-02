@@ -44,7 +44,16 @@ SYSTEM_PROMPT = (
 BRAND_EXTRACTION_PROMPT = """\
 You are a brand extraction assistant.
 Extract all brand names, company names, and product names mentioned in the text below.
-Normalize each name to its most common short form (e.g. "Nike Inc." → "Nike").
+
+Normalization rules:
+- Use Title Case for each brand name, but keep prepositions and conjunctions \
+(by, di, de, of, and, &, the) in lowercase unless they are the first word \
+(e.g. "Nike by Adidas" → "Nike by Adidas", "the North Face" → "The North Face").
+- Normalize each name to its most common short form (e.g. "Nike Inc." → "Nike").
+- Return each brand only once, even if it appears multiple times in the text.
+- If the same brand appears in slightly different forms, pick the most complete \
+and canonical form.
+
 Assign position as the ordinal of first mention (1 = first brand mentioned).
 If no brands are found, return empty.
 Respond ONLY in TOML format, no other text.
@@ -355,6 +364,24 @@ def _call_aio(question: str, country: str, language: str) -> tuple[Optional[str]
 # Brand extraction (secondary LLM — gpt-4o-mini)
 # ===========================================================================
 
+def _normalize_brand_name(name: str) -> str:
+    """Collassa spazi multipli e strip whitespace."""
+    return " ".join(name.strip().split())
+
+
+def _dedup_brands(brands: list[dict]) -> list[dict]:
+    """Dedup case-insensitive: mantieni la prima occorrenza per ogni brand."""
+    seen: dict[str, dict] = {}
+    for b in brands:
+        key = b.get("brand_name", "").lower().strip()
+        if not key:
+            continue
+        if key not in seen:
+            b["brand_name"] = _normalize_brand_name(b["brand_name"])
+            seen[key] = b
+    return list(seen.values())
+
+
 def _extract_brands(response_text: str) -> list[dict]:
     """
     Call gpt-4o-mini to extract brands from response_text.
@@ -401,6 +428,7 @@ def _extract_brands(response_text: str) -> list[dict]:
             for idx, b in enumerate(data.get("brands", []))
             if b.get("name")
         ]
+        brands = _dedup_brands(brands)
         logger.info("Brand extraction found %d brands: %s", len(brands), [b["brand_name"] for b in brands])
         return brands
     except Exception as exc:

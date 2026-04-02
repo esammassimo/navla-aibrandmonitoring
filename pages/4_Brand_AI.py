@@ -25,6 +25,13 @@ if not filters.project_id:
     st.info("Seleziona un progetto dalla barra laterale per iniziare.")
     st.stop()
 
+brand_filter = st.radio(
+    "Brand filter:",
+    options=["Mapped only", "All brands"],
+    index=0,
+    horizontal=True,
+)
+
 # ---------------------------------------------------------------------------
 # Load data
 # ---------------------------------------------------------------------------
@@ -40,46 +47,57 @@ if brand_df.empty:
 brand_df = brand_df.copy()
 brand_df["date"] = pd.to_datetime(brand_df["date"])
 
-# ---------------------------------------------------------------------------
-# KPI row
-# ---------------------------------------------------------------------------
-total_mentions = len(brand_df)
-unique_brands  = int(brand_df["brand"].nunique())
-own_count  = int(brand_df["is_own_brand"].astype(bool).sum())  if "is_own_brand"  in brand_df.columns else 0
-comp_count = int(brand_df["is_competitor"].astype(bool).sum()) if "is_competitor" in brand_df.columns else 0
+# KPI sempre calcolati sull'intero dataset (indipendenti dal filtro radio)
+brand_df_all = brand_df
 
-# Share of Voice: % of total mentions that belong to own brand
-sov_pct: float | None = round(own_count / total_mentions * 100, 1) if total_mentions > 0 and own_count > 0 else None
+if brand_filter == "Mapped only":
+    brand_df = brand_df[
+        (brand_df["is_own_brand"] == True) | (brand_df["is_competitor"] == True)  # noqa: E712
+    ]
 
-# SoV delta vs previous run date (if at least 2 distinct run dates)
-sov_delta: float | None = None
-if sov_pct is not None and "date" in brand_df.columns:
-    dates_sorted = sorted(brand_df["date"].dt.date.unique())
-    if len(dates_sorted) >= 2:
-        prev_date = str(dates_sorted[-2])
-        curr_date = str(dates_sorted[-1])
-        prev_df = brand_df[brand_df["date"].dt.date.astype(str) == prev_date]
-        curr_df = brand_df[brand_df["date"].dt.date.astype(str) == curr_date]
-        prev_own   = int(prev_df["is_own_brand"].astype(bool).sum()) if not prev_df.empty else 0
-        prev_total = len(prev_df)
-        curr_own   = int(curr_df["is_own_brand"].astype(bool).sum()) if not curr_df.empty else 0
-        curr_total = len(curr_df)
-        if prev_total > 0 and curr_total > 0:
-            sov_delta = round(curr_own / curr_total * 100 - prev_own / prev_total * 100, 1)
+if brand_df.empty:
+    st.info("Nessun brand mappato trovato. Vai in **Clienti > Gestione brand** per mappare i brand, oppure seleziona 'All brands'.")
+    st.stop()
+
+# ---------------------------------------------------------------------------
+# KPI row  — usa brand_df_all (non filtrato)
+# ---------------------------------------------------------------------------
+total_mentions = len(brand_df_all)
+own_count  = int((brand_df_all["is_own_brand"]  == True).sum()) if "is_own_brand"  in brand_df_all.columns else 0  # noqa: E712
+comp_count = int((brand_df_all["is_competitor"] == True).sum()) if "is_competitor" in brand_df_all.columns else 0  # noqa: E712
+
+sov_str = f"{own_count / total_mentions * 100:.1f}%" if total_mentions > 0 else "—"
+
+if "is_own_brand" in brand_df_all.columns and "position" in brand_df_all.columns:
+    own_pos = brand_df_all[brand_df_all["is_own_brand"] == True]["position"].dropna()  # noqa: E712
+    own_pos = pd.to_numeric(own_pos, errors="coerce").dropna()
+else:
+    own_pos = pd.Series(dtype=float)
+avg_own_pos_str = f"{own_pos.mean():.1f}" if not own_pos.empty else "—"
 
 k1, k2, k3, k4, k5 = st.columns(5)
-k1.metric("Citazioni totali", f"{total_mentions:,}")
-k2.metric("Brand unici", unique_brands)
-k3.metric("Brand proprio", f"{own_count:,}")
-k4.metric("Competitor", f"{comp_count:,}")
-if sov_pct is not None:
-    k5.metric(
-        "Share of Voice",
-        f"{sov_pct}%",
-        delta=f"{sov_delta:+.1f}pp" if sov_delta is not None else None,
+k1.metric("Total Mentions", f"{total_mentions:,}")
+k2.metric("Own Brand Mentions", f"{own_count:,}")
+k3.metric("Competitor Mentions", f"{comp_count:,}")
+k4.metric("Share of Voice", sov_str)
+k5.metric("Avg Own Position", avg_own_pos_str, help="lower = better")
+
+with st.expander("ℹ️ Cosa significano queste metriche", expanded=False):
+    st.markdown(
+        """
+| Metrica | Definizione |
+|---|---|
+| Total Mentions | Numero totale di volte in cui un qualsiasi brand è stato citato nelle risposte AI nel periodo selezionato. |
+| Own Brand Mentions | Numero di citazioni del tuo brand (o dei tuoi brand) nelle risposte AI. |
+| Competitor Mentions | Numero di citazioni dei brand competitor nelle risposte AI. |
+| Share of Voice | Quota di visibilità del tuo brand sul totale delle citazioni. Formula: Own Brand Mentions / Total Mentions. |
+| Avg Own Position | Posizione media del tuo brand nelle risposte AI. Posizione 1 = citato per primo. Più basso è meglio. |
+| Coverage | % di combinazioni domanda+run in cui il brand è stato citato almeno una volta. Misura quanto un brand è presente trasversalmente sulle domande monitorate. |
+| Avg Position | Posizione media del brand nelle risposte AI. Più basso = citato prima nel testo. |
+| SoV | Share of Voice del singolo brand: citazioni brand / citazioni totali. |
+| Top Prompts by Brand Mentions | Le domande (AI questions) che hanno generato il maggior numero di citazioni del brand proprio nel periodo selezionato. |
+"""
     )
-else:
-    k5.metric("Share of Voice", "—", help="Nessun brand marcato come 'Brand proprio'.")
 
 st.divider()
 
@@ -187,7 +205,84 @@ with st.expander("📋 Tabella ranking completa"):
     else:
         rank_full = rank_full[["brand", "citazioni"]]
         rank_full.columns = ["Brand", "Citazioni"]
+
+    # SoV per brand
+    rank_full["SoV"] = rank_full["Citazioni"].apply(
+        lambda c: f"{c / total_mentions * 100:.1f}%" if total_mentions > 0 else "—"
+    )
+
+    # Avg Position per brand
+    if "position" in brand_df.columns:
+        pos_avg_map = (
+            pd.to_numeric(brand_df["position"], errors="coerce")
+            .groupby(brand_df["brand"])
+            .mean()
+            .round(1)
+            .to_dict()
+        )
+        rank_full["Avg Position"] = rank_full["Brand"].map(pos_avg_map).apply(
+            lambda v: f"{v:.1f}" if pd.notna(v) else "—"
+        )
+    else:
+        rank_full["Avg Position"] = "—"
+
+    # Coverage: distinct (ai_question_id, run_id) per brand / total distinct (ai_question_id, run_id)
+    if {"ai_question_id", "run_id"}.issubset(brand_df.columns):
+        total_combos = brand_df.drop_duplicates(subset=["ai_question_id", "run_id"]).shape[0]
+        if total_combos > 0:
+            combos_per_brand = (
+                brand_df.drop_duplicates(subset=["brand", "ai_question_id", "run_id"])
+                .groupby("brand")
+                .size()
+                .div(total_combos)
+                .mul(100)
+                .round(1)
+                .to_dict()
+            )
+            rank_full["Coverage"] = rank_full["Brand"].map(combos_per_brand).apply(
+                lambda v: f"{v:.1f}%" if pd.notna(v) else "—"
+            )
+        else:
+            rank_full["Coverage"] = "—"
+    else:
+        rank_full["Coverage"] = "—"
+
     st.dataframe(rank_full, use_container_width=True, hide_index=True)
+
+st.divider()
+
+# ---------------------------------------------------------------------------
+# SECTION — Top Prompts by Brand Mentions
+# ---------------------------------------------------------------------------
+st.subheader("Top Prompts by Brand Mentions")
+st.caption("Le domande che generano più citazioni del tuo brand nelle risposte AI.")
+
+own_df = brand_df[brand_df["is_own_brand"] == True] if "is_own_brand" in brand_df.columns else pd.DataFrame()  # noqa: E712
+
+if own_df.empty:
+    st.info("Nessun brand proprio configurato. Vai in Clienti > Gestione brand per progetto.")
+else:
+    top_n_prompts = st.slider("Top N", min_value=5, max_value=20, value=10, step=5, key="top_prompts_n")
+    prompts_df = (
+        own_df.groupby("ai_question", as_index=False)
+        .size()
+        .rename(columns={"size": "Own Brand Mentions"})
+        .sort_values("Own Brand Mentions", ascending=False)
+        .head(top_n_prompts)
+        .reset_index(drop=True)
+    )
+    prompts_df.insert(0, "Rank", range(1, len(prompts_df) + 1))
+    prompts_df = prompts_df.rename(columns={"ai_question": "Prompt"})
+    st.dataframe(
+        prompts_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Rank":     st.column_config.NumberColumn("Rank",    width="small"),
+            "Prompt":   st.column_config.TextColumn("Prompt",   width="large"),
+            "Own Brand Mentions": st.column_config.NumberColumn("Own Brand Mentions", width="small"),
+        },
+    )
 
 st.divider()
 
@@ -287,45 +382,7 @@ with tl_col2:
 st.divider()
 
 # ---------------------------------------------------------------------------
-# SECTION 3 — Bubble chart: brand × LLM
-# ---------------------------------------------------------------------------
-st.subheader("Mappa citazioni: brand × LLM")
-
-bubble_n = st.slider("Top N brand", min_value=5, max_value=30, value=10, step=5, key="bubble_n")
-
-top_bubble_brands = (
-    brand_df.groupby("brand", as_index=False)
-    .size()
-    .sort_values("size", ascending=False)
-    .head(bubble_n)["brand"]
-    .tolist()
-)
-
-bubble_df = (
-    brand_df[brand_df["brand"].isin(top_bubble_brands)]
-    .groupby(["brand", "llm"], as_index=False)
-    .size()
-    .rename(columns={"size": "citazioni"})
-)
-
-bubble_chart = (
-    alt.Chart(bubble_df)
-    .mark_circle()
-    .encode(
-        x=alt.X("llm:N", title="LLM"),
-        y=alt.Y("brand:N", title="Brand", sort=alt.EncodingSortField(field="citazioni", op="sum", order="descending")),
-        size=alt.Size("citazioni:Q", title="Citazioni", scale=alt.Scale(range=[50, 2000])),
-        color=alt.Color("llm:N", legend=None),
-        tooltip=["brand", "llm", "citazioni"],
-    )
-    .properties(height=max(300, bubble_n * 30))
-)
-st.altair_chart(bubble_chart, use_container_width=True)
-
-st.divider()
-
-# ---------------------------------------------------------------------------
-# SECTION 4 — Position analysis
+# SECTION 3 — Position analysis
 # ---------------------------------------------------------------------------
 st.subheader("Analisi posizione nelle risposte")
 
@@ -336,46 +393,25 @@ else:
     pos_df["position"] = pd.to_numeric(pos_df["position"], errors="coerce")
     pos_df = pos_df[pos_df["position"].notna()]
 
-    pos_col1, pos_col2 = st.columns(2)
-
-    with pos_col1:
-        st.write("**Posizione media per brand (top 15)**")
-        pos_avg = (
-            pos_df.groupby("brand", as_index=False)
-            .agg(pos_media=("position", "mean"), citazioni=("position", "count"))
-            .sort_values("citazioni", ascending=False)
-            .head(15)
+    st.write("**Posizione media per brand (top 15)**")
+    pos_avg = (
+        pos_df.groupby("brand", as_index=False)
+        .agg(pos_media=("position", "mean"), citazioni=("position", "count"))
+        .sort_values("citazioni", ascending=False)
+        .head(15)
+    )
+    pos_avg["pos_media"] = pos_avg["pos_media"].round(1)
+    pos_chart = (
+        alt.Chart(pos_avg)
+        .mark_bar(color="steelblue")
+        .encode(
+            x=alt.X("pos_media:Q", title="Posizione media (più basso = prima)"),
+            y=alt.Y("brand:N", sort="x", title="Brand"),
+            tooltip=["brand", "pos_media", "citazioni"],
         )
-        pos_avg["pos_media"] = pos_avg["pos_media"].round(1)
-        pos_chart = (
-            alt.Chart(pos_avg)
-            .mark_bar()
-            .encode(
-                x=alt.X("pos_media:Q", title="Posizione media (più basso = prima)"),
-                y=alt.Y("brand:N", sort="x", title="Brand"),
-                color=alt.Color("citazioni:Q", title="Citazioni"),
-                tooltip=["brand", "pos_media", "citazioni"],
-            )
-            .properties(height=350)
-        )
-        st.altair_chart(pos_chart, use_container_width=True)
-
-    with pos_col2:
-        st.write("**Distribuzione posizioni (top 10 brand)**")
-        top10_pos = pos_avg.head(10)["brand"].tolist()
-        pos_dist = pos_df[pos_df["brand"].isin(top10_pos)]
-        box_chart = (
-            alt.Chart(pos_dist)
-            .mark_boxplot(extent="min-max")
-            .encode(
-                x=alt.X("position:Q", title="Posizione"),
-                y=alt.Y("brand:N", title="Brand"),
-                color=alt.Color("brand:N", legend=None),
-                tooltip=["brand"],
-            )
-            .properties(height=350)
-        )
-        st.altair_chart(box_chart, use_container_width=True)
+        .properties(height=350)
+    )
+    st.altair_chart(pos_chart, use_container_width=True)
 
 st.divider()
 
