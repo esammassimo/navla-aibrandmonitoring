@@ -338,7 +338,7 @@ if is_admin:
 
             if st.button("🚀 Genera domande", type="primary", key="btn_fanout", disabled=not selected_kws):
                 proj_row = fetch_project(project_id)
-                proj_lang = proj_row["language"] if proj_row is not None and "language" in proj_row else "it"
+                proj_lang = proj_row.iloc[0]["language"] if proj_row is not None and not proj_row.empty else "it"
 
                 try:
                     api_keys = dict(st.secrets.get("api_keys", {}))
