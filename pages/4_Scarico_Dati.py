@@ -38,7 +38,7 @@ if not project_id:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-_ALL_LLMS = ["chatgpt", "claude", "gemini", "perplexity", "aio"]
+_ALL_LLMS = ["chatgpt", "claude", "gemini", "perplexity", "aio", "aim"]
 
 
 def _calc_next_run(frequency: str, day_of_week: int, day_of_month: int) -> datetime:

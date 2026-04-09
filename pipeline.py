@@ -360,6 +360,72 @@ def _call_aio(question: str, country: str, language: str) -> tuple[Optional[str]
         return f"ERROR: {exc}", [], "google_aio"
 
 
+
+def _call_aim(question: str, country: str, language: str) -> tuple[Optional[str], list[str], str]:
+    """
+    Chiama Google AI Mode via SerpApi (engine=google_ai_mode).
+    Restituisce (response_text, sources, model_name).
+    response_text è None se AI Mode non restituisce risultati per la query.
+    """
+    key = _secrets().get("api_keys", {}).get("serpapi", "")
+    if not key:
+        return "DISABLED", [], "google_aim"
+
+    try:
+        resp = requests.get(
+            "https://serpapi.com/search",
+            params={
+                "engine": "google_ai_mode",
+                "q": question,
+                "api_key": key,
+                "hl": language,
+                "gl": country,
+                "no_cache": "false",
+            },
+            timeout=60,
+        )
+        resp.raise_for_status()
+        results = resp.json()
+
+        logger.info("AIM SerpApi response keys: %s", list(results.keys()))
+
+        text_blocks = results.get("text_blocks", [])
+        references  = results.get("references", [])
+
+        if not text_blocks and not references:
+            logger.info("AIM: no text_blocks/references for question: %s", question[:80])
+            return None, [], "google_aim"
+
+        # --- Assemble text from text_blocks ---
+        # Each block has {"type": "paragraph"|"list"|..., "snippet": str}
+        # List blocks may also have a "list" key with sub-items.
+        parts: list[str] = []
+        for block in text_blocks:
+            snippet = block.get("snippet", "").strip()
+            if snippet:
+                parts.append(snippet)
+            # Some blocks contain a nested list of items
+            for item in block.get("list", []):
+                item_text = item.get("snippet", "").strip()
+                if item_text:
+                    parts.append(f"- {item_text}")
+
+        text_out = "\n".join(parts).strip()
+
+        # Fallback: join reference snippets if text_blocks produced nothing
+        if not text_out:
+            text_out = "\n".join(
+                ref.get("snippet", "") for ref in references if ref.get("snippet")
+            ).strip()
+
+        # --- Sources from references[].link ---
+        sources = [ref["link"] for ref in references if ref.get("link")]
+
+        return text_out or None, sources, "google_aim"
+
+    except Exception as exc:
+        return f"ERROR: {exc}", [], "google_aim"
+
 # ===========================================================================
 # Brand extraction (secondary LLM — gpt-4o-mini)
 # ===========================================================================
@@ -619,6 +685,8 @@ def _worker(
             response_text, sources, model_name = _call_perplexity(question)
         elif llm == "aio":
             response_text, sources, model_name = _call_aio(question, country, language)
+        elif llm == "aim":
+            response_text, sources, model_name = _call_aim(question, country, language)
         else:
             response_text, sources, model_name = f"ERROR: unknown LLM '{llm}'", [], ""
 
