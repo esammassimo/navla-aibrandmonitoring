@@ -14,6 +14,7 @@ from utils import (
     fetch_ai_questions,
     fetch_clusters,
     fetch_keywords,
+    fetch_project,
     get_cookie_manager,
     insert_ai_questions,
     insert_keywords,
@@ -22,6 +23,7 @@ from utils import (
     run_query,
     update_ai_question_status,
 )
+from fanout import generate_fanout_queries
 
 cookie_manager = get_cookie_manager()
 require_login(cookie_manager)
@@ -311,6 +313,120 @@ if is_admin:
                         st.rerun()
             except Exception as exc:
                 st.error(f"Errore nel parsing del file: {exc}")
+
+
+    # --- Fan-out AI generation ---
+    with st.expander("🤖 Genera domande con AI (Fan-out)"):
+        st.caption(
+            "Genera automaticamente domande a partire dalle keyword del progetto usando Claude. "
+            "Le domande generate saranno in **draft** e potranno essere riviste prima dell'attivazione."
+        )
+        if kw_df.empty:
+            st.info("Aggiungi prima almeno una keyword al progetto.")
+        else:
+            kw_options = {r["keyword"]: str(r["id"]) for _, r in kw_df.iterrows()}
+            selected_kws = st.multiselect(
+                "Keyword da espandere",
+                options=list(kw_options.keys()),
+                default=list(kw_options.keys())[:min(5, len(kw_options))],
+                key="fanout_kw_select",
+                help="Seleziona le keyword per cui generare le domande fan-out.",
+            )
+            n_per_kw = st.slider(
+                "Domande per keyword", min_value=3, max_value=10, value=5, key="fanout_n"
+            )
+
+            if st.button("🚀 Genera domande", type="primary", key="btn_fanout", disabled=not selected_kws):
+                proj_row = fetch_project(project_id)
+                proj_lang = proj_row["language"] if proj_row is not None and "language" in proj_row else "it"
+
+                try:
+                    api_keys = dict(st.secrets.get("api_keys", {}))
+                except Exception:
+                    api_keys = {}
+
+                with st.spinner("Generazione in corso con Claude…"):
+                    try:
+                        fanout_result: dict = generate_fanout_queries(
+                            keywords=selected_kws,
+                            api_keys=api_keys,
+                            lang=proj_lang,
+                            n_per_keyword=n_per_kw,
+                        )
+                    except RuntimeError as e:
+                        st.error(str(e))
+                        fanout_result = {}
+                    except Exception as e:
+                        st.error(f"Errore durante la generazione: {e}")
+                        fanout_result = {}
+
+                if fanout_result:
+                    existing_questions = set(
+                        str(r["question"]).strip().lower() for _, r in q_df.iterrows()
+                    ) if not q_df.empty else set()
+
+                    kw_text_to_id = {r["keyword"]: str(r["id"]) for _, r in kw_df.iterrows()}
+
+                    preview_rows = []
+                    for kw_text, questions in fanout_result.items():
+                        kw_id = kw_text_to_id.get(kw_text)
+                        for q in questions:
+                            q_stripped = str(q).strip()
+                            if q_stripped.lower() not in existing_questions:
+                                preview_rows.append({
+                                    "keyword": kw_text,
+                                    "keyword_id": kw_id,
+                                    "question": q_stripped,
+                                    "_include": True,
+                                })
+
+                    if not preview_rows:
+                        st.info("Tutte le domande generate sono già presenti nel progetto.")
+                    else:
+                        st.success(f"Generate **{len(preview_rows)}** nuove domande. Seleziona quelle da importare:")
+                        preview_df = pd.DataFrame(preview_rows)
+                        st.session_state["fanout_preview_rows"] = preview_rows
+
+                        edited_preview = st.data_editor(
+                            preview_df[["_include", "keyword", "question"]].rename(
+                                columns={"_include": "Importa", "keyword": "Keyword", "question": "Domanda"}
+                            ),
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                "Importa": st.column_config.CheckboxColumn("Importa", default=True),
+                                "Domanda": st.column_config.TextColumn("Domanda", width="large"),
+                            },
+                            key="fanout_preview_editor",
+                        )
+                        st.session_state["fanout_edited_preview"] = edited_preview
+                        n_selected = int(edited_preview["Importa"].fillna(False).sum())
+                        st.caption(f"Selezionate: **{n_selected}** domande")
+
+            # Save button outside the generate button block so it persists after rerender
+            if "fanout_preview_rows" in st.session_state and "fanout_edited_preview" in st.session_state:
+                preview_rows = st.session_state["fanout_preview_rows"]
+                edited_preview = st.session_state["fanout_edited_preview"]
+                selected_mask = edited_preview["Importa"].fillna(False)
+                n_selected = int(selected_mask.sum())
+                if st.button("💾 Salva domande selezionate", type="primary", key="btn_fanout_save", disabled=n_selected == 0):
+                    rows_to_insert = []
+                    for i, include in enumerate(selected_mask):
+                        if include and i < len(preview_rows):
+                            rows_to_insert.append({
+                                "question": preview_rows[i]["question"],
+                                "keyword_id": preview_rows[i]["keyword_id"],
+                                "intent": None,
+                                "tone": None,
+                                "source": "fanout_ai",
+                                "status": "draft",
+                            })
+                    insert_ai_questions(project_id, rows_to_insert)
+                    fetch_ai_questions.clear()
+                    st.session_state.pop("fanout_preview_rows", None)
+                    st.session_state.pop("fanout_edited_preview", None)
+                    st.success(f"✅ {len(rows_to_insert)} domande salvate in **draft**.")
+                    st.rerun()
 
     # --- Bulk status change ---
     st.divider()
