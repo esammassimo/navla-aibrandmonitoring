@@ -111,12 +111,11 @@ def _build_export_xlsx(project_id: str, customer_id: str) -> bytes:
         # Auto-width (capped at 80 chars)
         for c_idx, h in enumerate(headers, 1):
             col_letter = get_column_letter(c_idx)
-            max_len = max(
-                len(str(h)),
-                *(len(str(row[c_idx - 1])) if row[c_idx - 1] is not None else 0 for row in rows[:200]),
-                default=len(str(h))
-            )
-            ws.column_dimensions[col_letter].width = min(max_len + 2, 80)
+            cell_lens = [len(str(h))] + [
+                len(str(row[c_idx - 1])) if row[c_idx - 1] is not None else 0
+                for row in rows[:200]
+            ]
+            ws.column_dimensions[col_letter].width = min(max(cell_lens) + 2, 80)
 
         # Freeze header row
         ws.freeze_panes = "A2"
