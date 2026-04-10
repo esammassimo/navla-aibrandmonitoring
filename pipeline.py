@@ -64,6 +64,20 @@ Text:
 
 GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
 
+# Mapping from internal identifier → display name stored in DB
+LLM_DISPLAY_NAMES: dict[str, str] = {
+    "chatgpt":    "ChatGPT",
+    "claude":     "Claude",
+    "gemini":     "Gemini",
+    "perplexity": "Perplexity",
+    "aio":        "AI Overviews",
+    "aim":        "AI Mode",
+}
+
+def _llm_display(llm: str) -> str:
+    """Return the canonical display name for a given LLM identifier."""
+    return LLM_DISPLAY_NAMES.get(llm, llm)
+
 
 # ===========================================================================
 # Helpers
@@ -580,7 +594,7 @@ def _db_insert_response(
                 "run_id": run_id,
                 "wid": worker_id,
                 "qid": ai_question_id,
-                "llm": llm,
+                "llm": _llm_display(llm),
                 "model": model,
                 "text": response_text,
                 "rdate": date.today(),
@@ -817,7 +831,7 @@ def start_run(
                             "INSERT INTO run_workers (run_id, ai_question_id, llm, status) "
                             "VALUES (:rid, :qid, :llm, 'pending') RETURNING id"
                         ),
-                        {"rid": run_id, "qid": str(qrow["id"]), "llm": llm},
+                        {"rid": run_id, "qid": str(qrow["id"]), "llm": _llm_display(llm)},
                     ).fetchone()
                     worker_ids.append((str(wrow[0]), str(qrow["id"]), str(qrow["question"]), llm, iter_idx))
 
@@ -933,7 +947,7 @@ def retry_failed_workers(
                 {
                     "rid": run_id,
                     "qid": str(row["ai_question_id"]),
-                    "llm": str(row["llm"]),
+                    "llm": _llm_display(str(row["llm"])),
                     "attempt": int(row["attempt"]) + 1,
                 },
             ).fetchone()
