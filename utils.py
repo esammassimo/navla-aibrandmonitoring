@@ -279,7 +279,7 @@ def render_sidebar(cookie_manager=None) -> FilterState:
                 opts = {row["name"]: str(row["id"]) for _, row in cdf.iterrows()}
                 current_name = next((k for k, v in opts.items() if v == customer_id),
                                     list(opts.keys())[0])
-                chosen = st.selectbox("Cliente", list(opts.keys()),
+                chosen = st.selectbox("Customer", list(opts.keys()),
                                       index=list(opts.keys()).index(current_name))
                 customer_id = opts[chosen]
                 st.session_state["customer_id"] = customer_id
@@ -291,7 +291,7 @@ def render_sidebar(cookie_manager=None) -> FilterState:
                 opts = {row["name"]: str(row["id"]) for _, row in pdf.iterrows()}
                 current_name = next((k for k, v in opts.items() if v == project_id),
                                     list(opts.keys())[0])
-                chosen = st.selectbox("Progetto", list(opts.keys()),
+                chosen = st.selectbox("Project", list(opts.keys()),
                                       index=list(opts.keys()).index(current_name))
                 project_id = opts[chosen]
                 st.session_state["project_id"] = project_id

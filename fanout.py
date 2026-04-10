@@ -16,7 +16,7 @@ def generate_fanout_queries(keywords: List[str], api_keys: Dict[str, str],
     """
     api_key = api_keys.get("anthropic", "")
     if not api_key:
-        raise RuntimeError("API key 'anthropic' non configurata. Vai in Configurazione → Chiavi API.")
+        raise RuntimeError("API key 'anthropic' not configured. Go to Configuration → API Keys.")
 
     keyword_list = "\n".join(f"- {kw}" for kw in keywords)
 

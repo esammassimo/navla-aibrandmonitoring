@@ -12,10 +12,10 @@ st.set_page_config(
 
 pg = st.navigation([
     st.Page("pages/Home.py",                   title="Home",              icon=":material/home:",        default=True),
-    st.Page("pages/0_Clienti.py",              title="Clienti",           icon=":material/people:"),
-    st.Page("pages/1_Progetti.py",             title="Nuovo Progetto",    icon=":material/folder:"),
+    st.Page("pages/0_Clienti.py",              title="Customers",           icon=":material/people:"),
+    st.Page("pages/1_Progetti.py",             title="New Project",    icon=":material/folder:"),
     st.Page("pages/2_Brand_Mapping.py",        title="Brand Mapping",     icon=":material/label:"),
-    st.Page("pages/3_Domande_e_Keyword.py",    title="Domande & Keyword", icon=":material/psychology:"),
-    st.Page("pages/4_Scarico_Dati.py",         title="Scarico Dati",      icon=":material/download:"),
+    st.Page("pages/3_Domande_e_Keyword.py",    title="Questions & Keywords", icon=":material/psychology:"),
+    st.Page("pages/4_Scarico_Dati.py",         title="Data Collection",      icon=":material/download:"),
 ])
 pg.run()
