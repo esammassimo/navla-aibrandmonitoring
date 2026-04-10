@@ -271,7 +271,7 @@ step = _get("step")
 # ---------------------------------------------------------------------------
 st.title("Nuovo Progetto")
 
-STEP_LABELS = ["Dati progetto", "Keyword & Domande", "Competitor", "Scheduling"]
+STEP_LABELS = ["Project Details", "Keywords & Prompts", "Competitor", "Scheduling"]
 cols = st.columns(4)
 for i, label in enumerate(STEP_LABELS):
     with cols[i]:
