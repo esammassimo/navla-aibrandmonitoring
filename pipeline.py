@@ -717,11 +717,16 @@ def _worker(
 # Public API
 # ===========================================================================
 
+# LLMs that support multiple iterations (sequential repetitions of the same prompt)
+_ITERABLE_LLMS = {"chatgpt", "claude", "gemini", "perplexity"}
+
+
 def start_run(
     project_id: str,
     llms: list[str],
     triggered_by: str = "manual",
     progress_callback: Optional[Callable[[int, int], None]] = None,
+    iterations: int = 1,
 ) -> str:
     """
     Create a run, launch all workers in parallel, wait for completion.
@@ -731,6 +736,9 @@ def start_run(
         llms:              List of LLM identifiers to query.
         triggered_by:      'manual' or 'scheduled'.
         progress_callback: Optional callback(completed, total) called after each worker.
+        iterations:        Number of sequential repetitions for iterable LLMs
+                           (chatgpt, claude, gemini, perplexity). aio and aim
+                           always run once. Min 1, no upper limit enforced here.
 
     Returns:
         run_id as string.
@@ -766,7 +774,16 @@ def start_run(
     )
     project_brands_list: list[dict] = pb_df.to_dict("records") if not pb_df.empty else []
 
-    total = len(questions_df) * len(llms)
+    iterations = max(1, int(iterations))
+
+    # Iterable LLMs run N times; aio/aim always run once
+    def _effective_iterations(llm: str) -> int:
+        return iterations if llm in _ITERABLE_LLMS else 1
+
+    total = sum(
+        len(questions_df) * _effective_iterations(llm)
+        for llm in llms
+    )
 
     # --- Create run record ---
     with engine.begin() as conn:
@@ -787,43 +804,63 @@ def start_run(
     run_id = str(row[0])
 
     # --- Create run_workers ---
-    worker_ids: list[tuple[str, str, str]] = []  # (worker_id, ai_question_id, question, llm)
+    # Each (question × llm) is repeated _effective_iterations(llm) times sequentially.
+    # worker_ids entries: (worker_id, ai_question_id, question, llm, iteration_index)
+    worker_ids: list[tuple[str, str, str, str, int]] = []
     with engine.begin() as conn:
         for _, qrow in questions_df.iterrows():
             for llm in llms:
-                wrow = conn.execute(
-                    text(
-                        "INSERT INTO run_workers (run_id, ai_question_id, llm, status) "
-                        "VALUES (:rid, :qid, :llm, 'pending') RETURNING id"
-                    ),
-                    {"rid": run_id, "qid": str(qrow["id"]), "llm": llm},
-                ).fetchone()
-                worker_ids.append((str(wrow[0]), str(qrow["id"]), str(qrow["question"]), llm))
+                n_iter = _effective_iterations(llm)
+                for iter_idx in range(n_iter):
+                    wrow = conn.execute(
+                        text(
+                            "INSERT INTO run_workers (run_id, ai_question_id, llm, status) "
+                            "VALUES (:rid, :qid, :llm, 'pending') RETURNING id"
+                        ),
+                        {"rid": run_id, "qid": str(qrow["id"]), "llm": llm},
+                    ).fetchone()
+                    worker_ids.append((str(wrow[0]), str(qrow["id"]), str(qrow["question"]), llm, iter_idx))
 
-    # --- Execute workers in parallel ---
+    # --- Execute workers ---
+    # Strategy: questions are parallelised via ThreadPoolExecutor.
+    # Iterations for the same (question × llm) pair are sequential — each
+    # iteration group is submitted only after the previous one completes.
+    # This avoids hitting rate limits with burst repeated requests.
     completed = 0
-    futures = {}
+
+    # Determine number of iteration rounds (max across iterable LLMs selected)
+    n_rounds = max((_effective_iterations(llm) for llm in llms), default=1)
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        for worker_id, ai_question_id, question, llm in worker_ids:
-            fut = executor.submit(
-                _worker,
-                run_id, worker_id, ai_question_id, question,
-                llm, country, language, delay, project_brands_list,
-            )
-            futures[fut] = worker_id
+        for iter_idx in range(n_rounds):
+            # Pick workers belonging to this iteration round
+            round_workers = [
+                (wid, qid, q, llm)
+                for wid, qid, q, llm, idx in worker_ids
+                if idx == iter_idx
+            ]
+            if not round_workers:
+                continue
 
-        for fut in as_completed(futures):
-            completed += 1
-            if progress_callback:
-                try:
-                    progress_callback(completed, total)
-                except Exception:
-                    pass
-            # Propagate unexpected exceptions from futures (worker already handles its own)
-            exc = fut.exception()
-            if exc:
-                logger.error("Unhandled future exception: %s", exc)
+            futures = {}
+            for worker_id, ai_question_id, question, llm in round_workers:
+                fut = executor.submit(
+                    _worker,
+                    run_id, worker_id, ai_question_id, question,
+                    llm, country, language, delay, project_brands_list,
+                )
+                futures[fut] = worker_id
+
+            for fut in as_completed(futures):
+                completed += 1
+                if progress_callback:
+                    try:
+                        progress_callback(completed, total)
+                    except Exception:
+                        pass
+                exc = fut.exception()
+                if exc:
+                    logger.error("Unhandled future exception: %s", exc)
 
     # --- Finalise run ---
     _db_finalize_run(run_id)

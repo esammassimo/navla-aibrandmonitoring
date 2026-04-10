@@ -39,6 +39,7 @@ if not project_id:
 # Helpers
 # ---------------------------------------------------------------------------
 _ALL_LLMS = ["chatgpt", "claude", "gemini", "perplexity", "aio", "aim"]
+_ITERABLE_LLMS = ["chatgpt", "claude", "gemini", "perplexity"]  # LLM che supportano iterazioni multiple
 
 
 def _calc_next_run(frequency: str, day_of_week: int, day_of_month: int) -> datetime:
@@ -58,6 +59,230 @@ def _calc_next_run(frequency: str, day_of_week: int, day_of_month: int) -> datet
                 year += 1
         return datetime(year, month, min(day_of_month, 28))
 
+
+
+# ===========================================================================
+# Export helpers
+# ===========================================================================
+
+def _build_export_xlsx(project_id: str, customer_id: str) -> bytes:
+    """
+    Build a Google Sheets-compatible .xlsx with all historical data for the
+    given project/customer. Returns the file as bytes for st.download_button.
+
+    Sheet structure (mirrors the Apps Script template):
+      1. Readme         — static description
+      2. Keyword        — keywords of the project
+      3. AI Questions   — active + draft questions
+      4. Brand - Apps Script   — v_brand_mentions_flat
+      5. Fonti - Apps Script   — v_source_mentions_flat
+      6. Risposte - Apps Script — v_ai_responses_flat
+    """
+    import io
+    import pandas as pd
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+    from utils import run_query, FilterState, fetch_keywords, fetch_ai_questions
+
+    # --- Palette (matches template) ---
+    HDR_BG   = "FF29282C"   # dark charcoal
+    HDR_FG   = "FFF0B910"   # gold/amber
+    HDR_FONT = Font(bold=True, color=HDR_FG, name="Arial", size=10)
+    HDR_FILL = PatternFill("solid", fgColor=HDR_BG)
+    HDR_ALIGN = Alignment(horizontal="left", vertical="center", wrap_text=False)
+    BODY_FONT = Font(name="Arial", size=10)
+    BODY_ALIGN = Alignment(horizontal="left", vertical="top", wrap_text=False)
+
+    def _write_sheet(ws, headers: list[str], rows: list[list]):
+        """Write header row + data rows with consistent styling."""
+        for c_idx, h in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=c_idx, value=h)
+            cell.font  = HDR_FONT
+            cell.fill  = HDR_FILL
+            cell.alignment = HDR_ALIGN
+
+        for r_idx, row in enumerate(rows, 2):
+            for c_idx, val in enumerate(row, 1):
+                cell = ws.cell(row=r_idx, column=c_idx, value=val)
+                cell.font      = BODY_FONT
+                cell.alignment = BODY_ALIGN
+
+        # Auto-width (capped at 80 chars)
+        for c_idx, h in enumerate(headers, 1):
+            col_letter = get_column_letter(c_idx)
+            max_len = max(
+                len(str(h)),
+                *(len(str(row[c_idx - 1])) if row[c_idx - 1] is not None else 0 for row in rows[:200]),
+                default=len(str(h))
+            )
+            ws.column_dimensions[col_letter].width = min(max_len + 2, 80)
+
+        # Freeze header row
+        ws.freeze_panes = "A2"
+
+    # --- Fetch data ---
+    filters = FilterState(
+        project_id=project_id,
+        customer_id=customer_id,
+        date_range=None,
+        llms=(),
+        clusters=(),
+    )
+
+    kw_df = run_query(
+        "SELECT keyword, cluster, subcluster, search_volume "
+        "FROM keywords WHERE project_id = %(pid)s ORDER BY cluster, keyword",
+        {"pid": project_id},
+    )
+    q_df = run_query(
+        "SELECT aq.question, k.keyword, k.cluster, k.subcluster, k.search_volume, "
+        "aq.intent, aq.tone "
+        "FROM ai_questions aq "
+        "LEFT JOIN keywords k ON k.id = aq.keyword_id "
+        "WHERE aq.project_id = %(pid)s ORDER BY k.cluster, aq.question",
+        {"pid": project_id},
+    )
+    brand_df = run_query(
+        "SELECT date, ai_question, keyword, cluster, subcluster, volume, "
+        "llm, model, brand, position, "
+        "(SELECT intent FROM ai_questions WHERE id = v.ai_question_id LIMIT 1) AS intent, "
+        "(SELECT tone   FROM ai_questions WHERE id = v.ai_question_id LIMIT 1) AS tone "
+        "FROM v_brand_mentions_flat v "
+        "WHERE project_id = %(pid)s ORDER BY date DESC, ai_question, llm, position",
+        {"pid": project_id},
+    )
+    source_df = run_query(
+        "SELECT date, ai_question, keyword, cluster, subcluster, volume, "
+        "llm, model, url, "
+        "(SELECT intent FROM ai_questions WHERE id = v.ai_question_id LIMIT 1) AS intent, "
+        "(SELECT tone   FROM ai_questions WHERE id = v.ai_question_id LIMIT 1) AS tone "
+        "FROM v_source_mentions_flat v "
+        "WHERE project_id = %(pid)s ORDER BY date DESC, ai_question, llm",
+        {"pid": project_id},
+    )
+    response_df = run_query(
+        "SELECT date, ai_question, keyword, cluster, subcluster, volume, "
+        "llm, model, response_text, "
+        "(SELECT intent FROM ai_questions WHERE id = v.ai_question_id LIMIT 1) AS intent, "
+        "(SELECT tone   FROM ai_questions WHERE id = v.ai_question_id LIMIT 1) AS tone "
+        "FROM v_ai_responses_flat v "
+        "WHERE project_id = %(pid)s ORDER BY date DESC, ai_question, llm",
+        {"pid": project_id},
+    )
+
+    # --- Build workbook ---
+    wb = Workbook()
+
+    # 1. Readme
+    ws_readme = wb.active
+    ws_readme.title = "Readme"
+    ws_readme.sheet_properties.tabColor = "29282C"
+    readme_lines = [
+        ("D2", "Readme | Configurazione", Font(bold=True, name="Arial", size=12, color="FF29282C")),
+        ("C5", "AI Brand Monitor è un tool che interroga automaticamente ChatGPT, Gemini, "
+               "Perplexity e altri modelli LLM utilizzando prompt predefiniti, restituendo "
+               "una classifica dei brand in base al posizionamento indicato dagli LLM interrogati.", None),
+        ("C7", "Come funziona", Font(bold=True, name="Arial", size=10)),
+        ("C9", "Avvia un run manuale dalla pagina Scarico Dati dell'app. "
+               "Al termine, esporta questo file per aggiornare il foglio Google Sheets.", None),
+        ("C11", "Output atteso", Font(bold=True, name="Arial", size=10)),
+        ("C13", "I fogli Brand - Apps Script, Fonti - Apps Script e Risposte - Apps Script "
+                "contengono tutti i dati storici del progetto, pronti per essere incollati "
+                "nel template Google Sheets.", None),
+    ]
+    for coord, text, font in readme_lines:
+        cell = ws_readme[coord]
+        cell.value = text
+        if font:
+            cell.font = font
+        else:
+            cell.font = Font(name="Arial", size=10)
+        cell.alignment = Alignment(wrap_text=True, vertical="top")
+    ws_readme.column_dimensions["C"].width = 90
+    ws_readme.column_dimensions["D"].width = 30
+
+    # 2. Keyword
+    ws_kw = wb.create_sheet("Keyword")
+    _write_sheet(
+        ws_kw,
+        headers=["Keyword", "CLUSTER", "SUBCLUSTER", "Volume"],
+        rows=[
+            [r.keyword, r.cluster, r.subcluster, r.search_volume]
+            for r in kw_df.itertuples(index=False)
+        ] if not kw_df.empty else [],
+    )
+
+    # 3. AI Questions
+    ws_q = wb.create_sheet("AI Questions")
+    _write_sheet(
+        ws_q,
+        headers=["AI Questions", "Keyword", "Cluster", "Subcluster", "Volume", "Intent", "Tone"],
+        rows=[
+            [r.question, r.keyword, r.cluster, r.subcluster, r.search_volume, r.intent, r.tone]
+            for r in q_df.itertuples(index=False)
+        ] if not q_df.empty else [],
+    )
+
+    # 4. Brand - Apps Script
+    ws_brand = wb.create_sheet("Brand - Apps Script")
+    _write_sheet(
+        ws_brand,
+        headers=["Data", "AI Questions", "Keyword", "Cluster", "Subcluster",
+                 "Volume", "LLM", "Model", "Brand", "Position", "Intent", "Tone"],
+        rows=[
+            [
+                r.date.strftime("%Y-%m-%d") if hasattr(r.date, "strftime") else str(r.date),
+                r.ai_question, r.keyword, r.cluster, r.subcluster, r.volume,
+                r.llm, r.model, r.brand, r.position, r.intent, r.tone,
+            ]
+            for r in brand_df.itertuples(index=False)
+        ] if not brand_df.empty else [],
+    )
+
+    # 5. Fonti - Apps Script
+    ws_source = wb.create_sheet("Fonti - Apps Script")
+    _write_sheet(
+        ws_source,
+        headers=["Data", "AI Questions", "Keyword", "Cluster", "Subcluster",
+                 "Volume", "LLM", "Model", "URL", "Intent", "Tone"],
+        rows=[
+            [
+                r.date.strftime("%Y-%m-%d") if hasattr(r.date, "strftime") else str(r.date),
+                r.ai_question, r.keyword, r.cluster, r.subcluster, r.volume,
+                r.llm, r.model, r.url, r.intent, r.tone,
+            ]
+            for r in source_df.itertuples(index=False)
+        ] if not source_df.empty else [],
+    )
+
+    # 6. Risposte - Apps Script
+    ws_resp = wb.create_sheet("Risposte - Apps Script")
+    # Response text can be long — wrap text and cap row height
+    ws_resp.row_dimensions[1].height = 20
+    _write_sheet(
+        ws_resp,
+        headers=["Data", "AI Questions", "Keyword", "Cluster", "Subcluster",
+                 "Volume", "LLM", "Model", "Risposta", "Intent", "Tone"],
+        rows=[
+            [
+                r.date.strftime("%Y-%m-%d") if hasattr(r.date, "strftime") else str(r.date),
+                r.ai_question, r.keyword, r.cluster, r.subcluster, r.volume,
+                r.llm, r.model, r.response_text, r.intent, r.tone,
+            ]
+            for r in response_df.itertuples(index=False)
+        ] if not response_df.empty else [],
+    )
+    # Risposta column (I) — wider and wrap text
+    ws_resp.column_dimensions["I"].width = 80
+    for row in ws_resp.iter_rows(min_row=2, min_col=9, max_col=9):
+        for cell in row:
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.read()
 
 # ===========================================================================
 # SECTION 1 — Avvio manuale
@@ -83,6 +308,29 @@ else:
             default=_ALL_LLMS,
             help="Seleziona almeno un LLM.",
         )
+
+        # Iterations slider — only meaningful for iterable LLMs
+        iterable_selected = [l for l in selected_llms if l in _ITERABLE_LLMS] if selected_llms else []
+        iterations = st.number_input(
+            "Iterazioni per prompt",
+            min_value=1,
+            max_value=50,
+            value=1,
+            step=1,
+            help=(
+                "Numero di volte che ogni domanda viene inviata a ciascun LLM supportato "
+                f"({', '.join(_ITERABLE_LLMS)}). "
+                "Le iterazioni sono sequenziali. Google AIO e AI Mode vengono sempre interrogati una sola volta."
+            ),
+            disabled=not iterable_selected,
+        )
+        if iterable_selected and iterations > 1:
+            st.caption(
+                f"⚠️ Con **{iterations} iterazioni**, ogni domanda verrà inviata "
+                f"**{iterations}×** a: {', '.join(iterable_selected)}. "
+                f"Totale worker stimati: **{n_active * (len(iterable_selected) * iterations + len([l for l in selected_llms if l not in _ITERABLE_LLMS]))}**"
+            )
+
         run_btn = st.form_submit_button("▶ Avvia run", type="primary", disabled=(n_active == 0))
 
     if run_btn:
@@ -104,6 +352,7 @@ else:
                     llms=selected_llms,
                     triggered_by="manual",
                     progress_callback=_progress_cb,
+                    iterations=int(iterations),
                 )
                 progress_bar.progress(1.0, text="Run completato.")
                 status_text.empty()
@@ -371,3 +620,56 @@ if save_sched:
         fetch_project_schedule.clear()
         st.success(f"Pianificazione salvata. Prossimo run: **{next_run_at.strftime('%d/%m/%Y')}**")
         st.rerun()
+
+# ===========================================================================
+# SECTION 5 — Export Google Sheets
+# ===========================================================================
+st.divider()
+st.subheader("Esporta dati per Google Sheets")
+
+customer_id: Optional[str] = st.session_state.get("customer_id")
+
+st.caption(
+    "Genera un file .xlsx compatibile con il template Google Sheets contenente "
+    "tutti i dati storici del progetto (keyword, domande, brand, fonti, risposte)."
+)
+
+col_exp1, col_exp2 = st.columns([3, 1])
+with col_exp1:
+    if runs_df.empty:
+        st.info("Nessun run disponibile per questo progetto. Avvia almeno un run prima di esportare.")
+    else:
+        n_runs = len(runs_df)
+        completed_runs = int((runs_df["status"].isin(["completed", "partial"])).sum())
+        st.caption(f"Run totali: **{n_runs}** &nbsp;|&nbsp; Completati/parziali: **{completed_runs}**")
+
+with col_exp2:
+    export_disabled = runs_df.empty
+    if st.button(
+        "📥 Genera export",
+        type="primary",
+        disabled=export_disabled,
+        use_container_width=True,
+        key="btn_export_xlsx",
+    ):
+        with st.spinner("Generazione file in corso…"):
+            try:
+                xlsx_bytes = _build_export_xlsx(project_id, customer_id or "")
+                st.session_state["export_xlsx_bytes"] = xlsx_bytes
+                st.success("File generato. Clicca Download per scaricarlo.")
+            except Exception as exc:
+                st.error(f"Errore durante la generazione: {exc}")
+                st.session_state.pop("export_xlsx_bytes", None)
+
+if "export_xlsx_bytes" in st.session_state:
+    from datetime import date as _date
+    fname = f"AI_Brand_Monitor_{project_id[:8]}_{_date.today().strftime('%Y%m%d')}.xlsx"
+    st.download_button(
+        label="⬇ Download .xlsx",
+        data=st.session_state["export_xlsx_bytes"],
+        file_name=fname,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=False,
+        key="dl_export_xlsx",
+    )
+
