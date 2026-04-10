@@ -173,36 +173,9 @@ def _build_export_xlsx(project_id: str, customer_id: str) -> bytes:
     # --- Build workbook ---
     wb = Workbook()
 
-    # 1. Readme
-    ws_readme = wb.active
-    ws_readme.title = "Readme"
-    ws_readme.sheet_properties.tabColor = "29282C"
-    readme_lines = [
-        ("D2", "Readme | Configurazione", Font(bold=True, name="Arial", size=12, color="FF29282C")),
-        ("C5", "AI Brand Monitor è un tool che interroga automaticamente ChatGPT, Gemini, "
-               "Perplexity e altri modelli LLM utilizzando prompt predefiniti, restituendo "
-               "una classifica dei brand in base al posizionamento indicato dagli LLM interrogati.", None),
-        ("C7", "Come funziona", Font(bold=True, name="Arial", size=10)),
-        ("C9", "Avvia un run manuale dalla pagina Scarico Dati dell'app. "
-               "Al termine, esporta questo file per aggiornare il foglio Google Sheets.", None),
-        ("C11", "Output atteso", Font(bold=True, name="Arial", size=10)),
-        ("C13", "I fogli Brand - Apps Script, Fonti - Apps Script e Risposte - Apps Script "
-                "contengono tutti i dati storici del progetto, pronti per essere incollati "
-                "nel template Google Sheets.", None),
-    ]
-    for coord, text, font in readme_lines:
-        cell = ws_readme[coord]
-        cell.value = text
-        if font:
-            cell.font = font
-        else:
-            cell.font = Font(name="Arial", size=10)
-        cell.alignment = Alignment(wrap_text=True, vertical="top")
-    ws_readme.column_dimensions["C"].width = 90
-    ws_readme.column_dimensions["D"].width = 30
-
-    # 2. Keyword
-    ws_kw = wb.create_sheet("Keyword")
+    # 1. Keyword
+    ws_kw = wb.active
+    ws_kw.title = "Keyword"
     _write_sheet(
         ws_kw,
         headers=["Keyword", "CLUSTER", "SUBCLUSTER", "Volume"],
@@ -212,7 +185,7 @@ def _build_export_xlsx(project_id: str, customer_id: str) -> bytes:
         ] if not kw_df.empty else [],
     )
 
-    # 3. AI Questions
+    # 2. AI Questions
     ws_q = wb.create_sheet("AI Questions")
     _write_sheet(
         ws_q,
@@ -223,7 +196,7 @@ def _build_export_xlsx(project_id: str, customer_id: str) -> bytes:
         ] if not q_df.empty else [],
     )
 
-    # 4. Brand - Apps Script
+    # 3. Brand - Apps Script
     ws_brand = wb.create_sheet("Brand - Apps Script")
     _write_sheet(
         ws_brand,
@@ -239,7 +212,7 @@ def _build_export_xlsx(project_id: str, customer_id: str) -> bytes:
         ] if not brand_df.empty else [],
     )
 
-    # 5. Fonti - Apps Script
+    # 4. Fonti - Apps Script
     ws_source = wb.create_sheet("Fonti - Apps Script")
     _write_sheet(
         ws_source,
@@ -255,7 +228,7 @@ def _build_export_xlsx(project_id: str, customer_id: str) -> bytes:
         ] if not source_df.empty else [],
     )
 
-    # 6. Risposte - Apps Script
+    # 5. Risposte - Apps Script
     ws_resp = wb.create_sheet("Risposte - Apps Script")
     # Response text can be long — wrap text and cap row height
     ws_resp.row_dimensions[1].height = 20
