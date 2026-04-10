@@ -296,13 +296,13 @@ if step == 1:
         st.stop()
 
     with st.form("step1_form"):
-        name = st.text_input("Nome progetto", value=_get("name", ""))
-        lang_label = st.selectbox("Lingua", list(LANGUAGES.keys()))
+        name = st.text_input("Project Name", value=_get("name", ""))
+        lang_label = st.selectbox("Lang", list(LANGUAGES.keys()))
         lang_code = LANGUAGES[lang_label]
 
         default_country = LANG_DEFAULT_COUNTRY.get(lang_code, "us")
         country_idx = COUNTRIES.index(default_country) if default_country in COUNTRIES else 0
-        country = st.selectbox("Paese", COUNTRIES, index=country_idx)
+        country = st.selectbox("Country", COUNTRIES, index=country_idx)
 
         submitted = st.form_submit_button("Next →", type="primary")
 
