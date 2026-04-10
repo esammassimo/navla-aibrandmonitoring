@@ -12,13 +12,14 @@ from utils import (
     fetch_brand_mentions,
     fetch_runs,
     get_cookie_manager,
+    render_inline_filters,
     render_sidebar,
     require_login,
 )
 
 cookie_manager = get_cookie_manager()
 require_login(cookie_manager)
-filters: FilterState = render_sidebar(cookie_manager)
+render_sidebar(cookie_manager)   # handles login/logout + customer+project selectors only
 project_id = st.session_state.get("project_id")
 
 st.title("Home — Overview")
@@ -35,21 +36,49 @@ if not project_id:
     st.stop()
 
 # ---------------------------------------------------------------------------
-# Data loading
+# Runs summary row  (loaded without filters — always full count)
+# ---------------------------------------------------------------------------
+runs_df = fetch_runs(project_id)
+
+# ---------------------------------------------------------------------------
+# Top summary row
+# ---------------------------------------------------------------------------
+completed_runs = int((runs_df["status"].isin(["completed", "partial"])).sum()) if not runs_df.empty else 0
+
+m1, m2, m3 = st.columns(3)
+m1.metric("Runs", completed_runs)
+m2.metric("AI Platform", "—")
+m3.metric("AI Questions", "—")
+
+# ---------------------------------------------------------------------------
+# Inline filters — Periodo / LLM / Cluster
+# ---------------------------------------------------------------------------
+st.divider()
+filters = render_inline_filters(project_id)
+
+# ---------------------------------------------------------------------------
+# Data loading (filtered)
 # ---------------------------------------------------------------------------
 brand_df  = fetch_brand_mentions(filters)
 resp_df   = fetch_ai_responses_flat(filters)
-runs_df   = fetch_runs(project_id)
+
+st.divider()
+
+if brand_df.empty:
+    st.info(
+        "Nessun dato per il periodo selezionato. "
+        "Avvia un run dalla pagina **Scarico Dati** per iniziare."
+    )
+    st.stop()
 
 # ---------------------------------------------------------------------------
-# Derived metrics
+# Derived metrics (computed after filters applied)
 # ---------------------------------------------------------------------------
-total_mentions  = len(brand_df)
-completed_runs  = int((runs_df["status"].isin(["completed", "partial"])).sum()) if not runs_df.empty else 0
-n_llms          = int(brand_df["llm"].nunique())         if not brand_df.empty else 0
-n_questions     = int(brand_df["ai_question"].nunique()) if not brand_df.empty else 0
+total_mentions = len(brand_df)
+n_llms         = int(brand_df["llm"].nunique())
+n_questions    = int(brand_df["ai_question"].nunique())
 
-if not brand_df.empty and "is_own_brand" in brand_df.columns:
+if "is_own_brand" in brand_df.columns:
     own_df  = brand_df[brand_df["is_own_brand"].astype(bool)]
     comp_df = brand_df[brand_df["is_competitor"].astype(bool)]
 else:
@@ -61,22 +90,10 @@ comp_mentions = len(comp_df)
 sov_pct       = (own_mentions / total_mentions * 100) if total_mentions > 0 else 0.0
 avg_pos_own   = float(own_df["position"].mean()) if not own_df.empty and "position" in own_df.columns else None
 
-# ---------------------------------------------------------------------------
-# Top summary row
-# ---------------------------------------------------------------------------
-m1, m2, m3 = st.columns(3)
+# Update summary row metrics with real values now that data is loaded
 m1.metric("Runs", completed_runs)
 m2.metric("AI Platform", n_llms)
 m3.metric("AI Questions", n_questions)
-
-st.divider()
-
-if brand_df.empty:
-    st.info(
-        "Nessun dato per il periodo selezionato. "
-        "Avvia un run dalla pagina **Scarico Dati** per iniziare."
-    )
-    st.stop()
 
 # ---------------------------------------------------------------------------
 # KPI row — 5 brand cards

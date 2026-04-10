@@ -298,25 +298,49 @@ def render_sidebar(cookie_manager=None) -> FilterState:
 
         st.divider()
 
-        # Date range
-        today = date.today()
-        dr = st.date_input("Periodo", value=(today - timedelta(days=30), today),
-                           max_value=today)
+    return FilterState(
+        project_id=project_id,
+        customer_id=customer_id,
+        date_range=None,
+        llms=(),
+        clusters=(),
+    )
+
+
+def render_inline_filters(project_id: Optional[str]) -> FilterState:
+    """
+    Render Periodo / LLM / Cluster filters inline (not in sidebar).
+    Returns a FilterState with project_id/customer_id from session_state
+    plus the selected filter values.
+    Call this after render_sidebar() on pages that need date/LLM/cluster filtering.
+    """
+    customer_id: Optional[str] = st.session_state.get("customer_id")
+
+    today = date.today()
+    col_date, col_llm, col_cluster = st.columns([2, 2, 2])
+
+    with col_date:
+        dr = st.date_input(
+            "Periodo",
+            value=(today - timedelta(days=30), today),
+            max_value=today,
+            key="inline_filter_date",
+        )
         date_range: Optional[Tuple[date, date]] = (
             (dr[0], dr[1]) if isinstance(dr, (list, tuple)) and len(dr) == 2 else None
         )
 
-        # LLM filter
-        llm_opts = ["chatgpt", "claude", "gemini", "perplexity", "aio"]
-        sel_llms = st.multiselect("LLM", llm_opts)
+    with col_llm:
+        llm_opts = ["chatgpt", "claude", "gemini", "perplexity", "aio", "aim"]
+        sel_llms = st.multiselect("LLM", llm_opts, key="inline_filter_llms")
 
-        # Cluster filter (project-scoped)
+    with col_cluster:
         sel_clusters: list[str] = []
         if project_id:
             cl_df = fetch_clusters(project_id)
             cl_vals = cl_df["cluster"].dropna().tolist()
             if cl_vals:
-                sel_clusters = st.multiselect("Cluster", cl_vals)
+                sel_clusters = st.multiselect("Cluster", cl_vals, key="inline_filter_clusters")
 
     return FilterState(
         project_id=project_id,
