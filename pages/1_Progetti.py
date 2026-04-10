@@ -27,7 +27,7 @@ require_login(cookie_manager)
 render_sidebar(cookie_manager)
 
 if st.session_state.get("role") != "admin":
-    st.error("Accesso riservato agli amministratori.")
+    st.error("Access restricted to administrators.")
     st.stop()
 
 # ---------------------------------------------------------------------------
@@ -49,10 +49,10 @@ COUNTRIES = [
     "cl", "au", "ca", "jp", "in", "za",
 ]
 DOW_LABELS = {
-    "Lunedì": 0, "Martedì": 1, "Mercoledì": 2, "Giovedì": 3,
-    "Venerdì": 4, "Sabato": 5, "Domenica": 6,
+    "Monday": 0, "Tuesday": 1, "Wednesday": 2, "Thursday": 3,
+    "Friday": 4, "Saturday": 5, "Sunday": 6,
 }
-FREQ_LABELS = {"Settimanale": "weekly", "Bisettimanale": "biweekly", "Mensile": "monthly"}
+FREQ_LABELS = {"Weekly": "weekly", "Biweekly": "biweekly", "Monthly": "monthly"}
 LLM_OPTIONS = ["chatgpt", "claude", "gemini", "perplexity", "aio"]
 
 # ---------------------------------------------------------------------------
@@ -288,7 +288,7 @@ st.divider()
 # STEP 1 — Dati progetto
 # ===========================================================================
 if step == 1:
-    st.subheader("Step 1 — Dati del progetto")
+    st.subheader("Step 1 — Project details")
     customer_id = st.session_state.get("customer_id")
 
     if not customer_id:
@@ -304,13 +304,13 @@ if step == 1:
         country_idx = COUNTRIES.index(default_country) if default_country in COUNTRIES else 0
         country = st.selectbox("Paese", COUNTRIES, index=country_idx)
 
-        submitted = st.form_submit_button("Avanti →", type="primary")
+        submitted = st.form_submit_button("Next →", type="primary")
 
     if submitted:
         if not name.strip():
-            st.error("Il nome del progetto è obbligatorio.")
+            st.error("Project name is required.")
         else:
-            with st.spinner("Creazione progetto…"):
+            with st.spinner("Creating project…"):
                 project_id = create_project(customer_id, name.strip(), lang_code, country)
             _set("project_id", project_id)
             _set("name", name.strip())
@@ -324,7 +324,7 @@ if step == 1:
 # STEP 2 — Keyword & Domande
 # ===========================================================================
 elif step == 2:
-    st.subheader("Step 2 — Keyword e Domande")
+    st.subheader("Step 2 — Keywords & Questions")
     project_id: str = _get("project_id")
     language: str = _get("language", "en")
     country: str = _get("country", "us")
@@ -332,9 +332,9 @@ elif step == 2:
     path = st.radio(
         "Cosa hai a disposizione?",
         options=[
-            "A — Ho keyword e domande (file completo)",
-            "B — Ho solo keyword (recupero PAA da SerpApi)",
-            "C — Non ho nulla, aggiungo in seguito",
+            "A — I have keywords and questions (complete file)",
+            "B — I have keywords only (fetch PAA from SerpApi)",
+            "C — No data yet, I'll add later",
         ],
         key="wiz1_path",
         horizontal=True,
@@ -366,9 +366,9 @@ elif step == 2:
                 _set("step", 1)
                 st.rerun()
         with c2:
-            if st.button("Salva e avanti →", type="primary", key="a_next",
+            if st.button("Save and next →", type="primary", key="a_next",
                          disabled=_get("file_a_df") is None):
-                with st.spinner("Salvataggio keyword e domande…"):
+                with st.spinner("Saving keywords and questions…"):
                     _save_percorso_a(project_id, _get("file_a_df"))
                 _set("step", 3)
                 st.rerun()
@@ -402,7 +402,7 @@ elif step == 2:
 
         if _get("paa_df") is not None:
             paa = _get("paa_df")
-            st.subheader(f"Domande PAA ({len(paa)}) — seleziona quelle da importare")
+            st.subheader(f"PAA Questions ({len(paa)}) — select those to import")
             edited = st.data_editor(
                 paa,
                 use_container_width=True,
@@ -424,11 +424,11 @@ elif step == 2:
                 _set("step", 1)
                 st.rerun()
         with c2:
-            if st.button("Salva e avanti →", type="primary", key="b_next",
+            if st.button("Save and next →", type="primary", key="b_next",
                          disabled=_get("file_b_df") is None):
                 _edited = _get("paa_df_edited")
                 edited = _edited if _edited is not None else _get("paa_df")
-                with st.spinner("Salvataggio keyword e domande…"):
+                with st.spinner("Saving keywords and questions…"):
                     _save_percorso_b(project_id, _get("file_b_df"), edited)
                 _set("step", 3)
                 st.rerun()
@@ -436,7 +436,7 @@ elif step == 2:
     # ---- PERCORSO C ----
     else:
         st.info(
-            "Il progetto verrà creato senza keyword o domande. "
+            "The project will be created without keywords or questions. "
             "Potrai aggiungerle in seguito dalla pagina **Domande e Keyword**."
         )
         c1, c2 = st.columns([1, 6])
@@ -445,7 +445,7 @@ elif step == 2:
                 _set("step", 1)
                 st.rerun()
         with c2:
-            if st.button("Avanti →", type="primary", key="c_next"):
+            if st.button("Next →", type="primary", key="c_next"):
                 _set("step", 3)
                 st.rerun()
 
@@ -453,12 +453,12 @@ elif step == 2:
 # STEP 3 — Competitor brands
 # ===========================================================================
 elif step == 3:
-    st.subheader("Step 3 — Brand e Competitor (opzionale)")
+    st.subheader("Step 3 — Brands & Competitors (optional)")
     project_id = _get("project_id")
 
     st.caption(
         "Inserisci i brand da monitorare (uno per riga o separati da virgola). "
-        "Per ciascuno indica se è un competitor o un tuo brand proprio."
+        "For each one, indicate whether it is a competitor or your own brand."
     )
 
     raw_input = st.text_area(
@@ -497,16 +497,16 @@ elif step == 3:
             _set("step", 2)
             st.rerun()
     with c2:
-        if st.button("Salta →", key="s3_skip"):
+        if st.button("Skip →", key="s3_skip"):
             _set("step", 4)
             st.rerun()
     with c3:
-        if st.button("Salva e avanti →", type="primary", key="s3_next",
+        if st.button("Save and next →", type="primary", key="s3_next",
                      disabled=not parsed):
             conflicting = [b for b in parsed if brand_competitor.get(b) and brand_own.get(b)]
             if conflicting:
                 st.error(
-                    f"Un brand non può essere sia competitor che brand proprio: "
+                    f"A brand cannot be both competitor and own brand: "
                     f"**{', '.join(conflicting)}**"
                 )
             else:
@@ -526,7 +526,7 @@ elif step == 3:
 # STEP 4 — Schedule automatico
 # ===========================================================================
 elif step == 4:
-    st.subheader("Step 4 — Scheduling automatico (opzionale)")
+    st.subheader("Step 4 — Automatic scheduling (optional)")
     project_id = _get("project_id")
 
     freq_label = st.selectbox("Frequenza", list(FREQ_LABELS.keys()), key="wiz1_freq")
@@ -559,7 +559,7 @@ elif step == 4:
         if st.button("Salta e completa", key="s4_skip"):
             _finalize()
     with c3:
-        if st.button("Salva e completa →", type="primary", key="s4_save",
+        if st.button("Save and complete →", type="primary", key="s4_save",
                      disabled=not sel_llms):
             upsert_project_schedule(project_id, {
                 "frequency": freq,
@@ -579,7 +579,7 @@ elif step == 5:
 
     col1, col2 = st.columns(2)
     with col1:
-        st.metric("Progetto ID", _get("project_id") or "—")
+        st.metric("Project ID", _get("project_id") or "—")
     with col2:
         st.metric("Lingua / Paese", f"{_get('language', '')} / {_get('country', '')}")
 
@@ -590,6 +590,6 @@ elif step == 5:
             _reset()
             st.rerun()
     with c2:
-        if st.button("Vai a Domande e Keyword →", type="primary"):
+        if st.button("Go to Questions & Keywords →", type="primary"):
             _reset()
             st.switch_page("pages/3_Domande_e_Keyword.py")

@@ -27,7 +27,7 @@ customer_id = st.session_state.get("customer_id")
 st.title("Brand Mapping")
 
 if not project_id:
-    st.info("Seleziona un progetto dalla sidebar.")
+    st.info("Please select a project from the sidebar.")
     st.stop()
 
 # ---------------------------------------------------------------------------
@@ -82,11 +82,11 @@ edited_a = st.data_editor(
     column_config={
         "brand_name":    st.column_config.TextColumn("Brand", width="large"),
         "is_competitor": st.column_config.CheckboxColumn("Competitor?"),
-        "is_own_brand":  st.column_config.CheckboxColumn("Brand proprio?"),
-        "is_excluded":   st.column_config.CheckboxColumn("Escludi?"),
+        "is_own_brand":  st.column_config.CheckboxColumn("Own brand?"),
+        "is_excluded":   st.column_config.CheckboxColumn("Exclude?"),
         "canonical_name": st.column_config.TextColumn(
-            "Nome canonico (opzionale)",
-            help="Se compilato, questo brand e le sue varianti fuzzy-matched verranno salvati con questo nome",
+            "Canonical name (optional)",
+            help="If set, this brand and its fuzzy-matched variants will be saved under this name",
         ),
     },
     num_rows="dynamic" if is_admin else "fixed",
@@ -96,8 +96,8 @@ edited_a = st.data_editor(
     key=f"brand_editor_a_{project_id}_{search_a}_{len(pending_rows)}",
 )
 st.caption(
-    "I brand esclusi non compaiono in nessuna analisi. "
-    "Usali per rimuovere falsi positivi rilevati automaticamente dagli LLM."
+    "Excluded brands do not appear in any analysis. "
+    "Use them to remove false positives automatically detected by LLMs."
 )
 
 # ===========================================================================
@@ -140,7 +140,7 @@ if is_admin:
                     "_add":          st.column_config.CheckboxColumn("Add?", width="small"),
                     "brand_name":    st.column_config.TextColumn("Brand", width="large"),
                     "is_competitor": st.column_config.CheckboxColumn("Competitor?"),
-                    "is_own_brand":  st.column_config.CheckboxColumn("Brand proprio?"),
+                    "is_own_brand":  st.column_config.CheckboxColumn("Own brand?"),
                 },
                 disabled=["brand_name"],
                 num_rows="fixed",
@@ -177,7 +177,7 @@ if is_admin:
 # ===========================================================================
 if is_admin:
     st.divider()
-    if st.button("Salva brand", type="primary", key="save_brands_btn"):
+    if st.button("Save brands", type="primary", key="save_brands_btn"):
         final_df = pd.concat([edited_a, hidden_a], ignore_index=True)
         valid = final_df[final_df["brand_name"].astype(str).str.strip() != ""].copy()
         valid["brand_name"]    = valid["brand_name"].astype(str).str.strip()
@@ -193,15 +193,15 @@ if is_admin:
         own_brand_count = valid["is_own_brand"].sum()
         if own_brand_count > 1:
             st.error(
-                f"Puoi configurare al massimo **1 brand proprio** per progetto. "
-                f"Trovati: {int(own_brand_count)}."
+                f"You can configure at most **1 own brand** per project. "
+                f"Found: {int(own_brand_count)}."
             )
             st.stop()
 
         conflicting = valid[valid["is_competitor"] & valid["is_own_brand"]]["brand_name"].tolist()
         if conflicting:
             st.error(
-                f"Un brand non può essere sia competitor che brand proprio: "
+                f"A brand cannot be both competitor and own brand: "
                 f"**{', '.join(conflicting)}**"
             )
             st.stop()
@@ -216,5 +216,5 @@ if is_admin:
 
         st.session_state[pending_key] = []
         st.cache_data.clear()
-        st.success(f"Salvati {len(valid)} brand per il progetto.")
+        st.success(f"Saved {len(valid)} brands for this project.")
         st.rerun()

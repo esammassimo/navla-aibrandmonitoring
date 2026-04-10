@@ -26,13 +26,13 @@ st.title("Home — Overview")
 
 if not st.session_state.get("customer_id"):
     st.info(
-        "Benvenuto! Nessun cliente è ancora associato al tuo account. "
-        "Vai alla pagina **Clienti** per creare il primo cliente e poi assegnare il tuo utente."
+        "Welcome! No customer is associated with your account yet. "
+        "Go to the **Customers** page to create the first customer and assign your user."
     )
     st.stop()
 
 if not project_id:
-    st.info("Seleziona un progetto dalla barra laterale per iniziare.")
+    st.info("Select a project from the sidebar to get started.")
     st.stop()
 
 # ---------------------------------------------------------------------------
@@ -66,8 +66,8 @@ st.divider()
 
 if brand_df.empty:
     st.info(
-        "Nessun dato per il periodo selezionato. "
-        "Avvia un run dalla pagina **Scarico Dati** per iniziare."
+        "No data for the selected period. "
+        "Start a run from the **Data Collection** page to begin."
     )
     st.stop()
 
@@ -102,15 +102,15 @@ st.subheader("Analyze your brands positioning on LLM")
 
 k1, k2, k3, k4, k5 = st.columns(5)
 k1.metric("SoV %",               f"{sov_pct:.2f}%",
-          help="Share of Voice: menzioni brand proprio / totale × 100")
+          help="Share of Voice: own brand mentions / total × 100")
 k2.metric("Own Brand Mentions",  f"{own_mentions:,}",
-          help="Totale citazioni del brand proprio")
+          help="Total own brand citations")
 k3.metric("Avg Position Own",    f"{avg_pos_own:.2f}" if avg_pos_own is not None else "—",
-          help="Posizione media brand proprio (più basso = meglio)")
+          help="Average own brand position (lower = better)")
 k4.metric("Competitor Mentions", f"{comp_mentions:,}",
-          help="Totale citazioni dei competitor")
+          help="Total competitor citations")
 k5.metric("All Brand Mentions",  f"{total_mentions:,}",
-          help="Totale citazioni di tutti i brand")
+          help="Total citations of all brands")
 
 st.divider()
 
@@ -159,7 +159,7 @@ if not own_df.empty:
         use_container_width=True,
     )
 else:
-    st.info("Nessun brand proprio configurato — configura i brand nella pagina Brand Mapping.")
+    st.info("No own brand configured — configure brands in the Brand Mapping page.")
 
 st.divider()
 
@@ -182,7 +182,7 @@ with col_l:
         bn["SoV %"] = bn["SoV %"].apply(lambda x: f"{x:.2f}%")
         st.dataframe(bn, use_container_width=True, hide_index=True)
     else:
-        st.info("Nessun brand proprio configurato.")
+        st.info("No own brand configured.")
 
 with col_r:
     st.subheader("Your Brands — AI Platform")
@@ -198,7 +198,7 @@ with col_r:
         bp["SoV %"] = bp["SoV %"].apply(lambda x: f"{x:.2f}%")
         st.dataframe(bp, use_container_width=True, hide_index=True)
     else:
-        st.info("Nessun brand proprio configurato.")
+        st.info("No own brand configured.")
 
 st.divider()
 
@@ -246,10 +246,10 @@ st.divider()
 # ---------------------------------------------------------------------------
 # Run recenti
 # ---------------------------------------------------------------------------
-st.subheader("Run recenti")
+st.subheader("Recent runs")
 
 if runs_df.empty:
-    st.info("Nessun run eseguito per questo progetto.")
+    st.info("No runs executed for this project.")
 else:
     display_cols = [
         "started_at", "status", "triggered_by",
@@ -260,11 +260,11 @@ else:
         use_container_width=True,
         hide_index=True,
         column_config={
-            "started_at":          st.column_config.DatetimeColumn("Avviato",   format="DD/MM/YY HH:mm"),
-            "finished_at":         st.column_config.DatetimeColumn("Terminato", format="DD/MM/YY HH:mm"),
-            "status":              st.column_config.TextColumn("Stato"),
-            "triggered_by":        st.column_config.TextColumn("Origine"),
-            "completed_questions": st.column_config.NumberColumn("Completate"),
-            "total_questions":     st.column_config.NumberColumn("Totali"),
+            "started_at":          st.column_config.DatetimeColumn("Started",   format="DD/MM/YY HH:mm"),
+            "finished_at":         st.column_config.DatetimeColumn("Finished", format="DD/MM/YY HH:mm"),
+            "status":              st.column_config.TextColumn("Status"),
+            "triggered_by":        st.column_config.TextColumn("Source"),
+            "completed_questions": st.column_config.NumberColumn("Completed"),
+            "total_questions":     st.column_config.NumberColumn("Total"),
         },
     )
