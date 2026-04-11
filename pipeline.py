@@ -78,6 +78,13 @@ def _llm_display(llm: str) -> str:
     """Return the canonical display name for a given LLM identifier."""
     return LLM_DISPLAY_NAMES.get(llm, llm)
 
+# Reverse mapping: display name → internal key (for UI → pipeline dispatch)
+LLM_KEYS: dict[str, str] = {v: k for k, v in LLM_DISPLAY_NAMES.items()}
+
+def _llm_key(display: str) -> str:
+    """Convert a display name back to its internal identifier for dispatch."""
+    return LLM_KEYS.get(display, display.lower())
+
 
 # ===========================================================================
 # Helpers
@@ -689,17 +696,19 @@ def _worker(
         _db_update_worker_running(worker_id)
 
         # --- Call the appropriate LLM ---
-        if llm == "chatgpt":
+        # llm may be a display name (e.g. "ChatGPT") — convert to internal key for dispatch
+        llm_key = _llm_key(llm)
+        if llm_key == "chatgpt":
             response_text, sources, model_name = _call_chatgpt(question, country)
-        elif llm == "claude":
+        elif llm_key == "claude":
             response_text, sources, model_name = _call_claude(question)
-        elif llm == "gemini":
+        elif llm_key == "gemini":
             response_text, sources, model_name = _call_gemini(question, country, language)
-        elif llm == "perplexity":
+        elif llm_key == "perplexity":
             response_text, sources, model_name = _call_perplexity(question)
-        elif llm == "aio":
+        elif llm_key == "aio":
             response_text, sources, model_name = _call_aio(question, country, language)
-        elif llm == "aim":
+        elif llm_key == "aim":
             response_text, sources, model_name = _call_aim(question, country, language)
         else:
             response_text, sources, model_name = f"ERROR: unknown LLM '{llm}'", [], ""
@@ -732,7 +741,7 @@ def _worker(
 # ===========================================================================
 
 # LLMs that support multiple iterations (sequential repetitions of the same prompt)
-_ITERABLE_LLMS = {"chatgpt", "claude", "gemini", "perplexity"}
+_ITERABLE_LLMS = {"ChatGPT", "Claude", "Gemini", "Perplexity"}
 
 
 def start_run(
