@@ -84,6 +84,44 @@ def _insert_brands(rows: list[dict]) -> None:
     fetch_project_brands.clear()
 
 
+def _apply_canonical(old_name: str, canonical_name: str) -> int:
+    """
+    Remap all brand_mentions for this project from old_name → canonical_name.
+    Also updates project_brands.canonical_name for persistence.
+    Returns the number of brand_mentions rows updated.
+    """
+    canonical_name = canonical_name.strip()
+    if not canonical_name or canonical_name.lower() == old_name.lower():
+        return 0
+    with get_engine().begin() as conn:
+        # Update historical brand_mentions
+        result = conn.execute(
+            text(
+                "UPDATE brand_mentions bm "
+                "SET brand_name = :canonical "
+                "FROM ai_responses ar "
+                "JOIN runs r ON r.id = ar.run_id "
+                "WHERE bm.ai_response_id = ar.id "
+                "  AND r.project_id = :pid "
+                "  AND LOWER(bm.brand_name) = LOWER(:old_name)"
+            ),
+            {"canonical": canonical_name, "pid": project_id, "old_name": old_name},
+        )
+        n_updated = result.rowcount
+        # Persist canonical_name on project_brands
+        conn.execute(
+            text(
+                "UPDATE project_brands "
+                "SET canonical_name = :canonical "
+                "WHERE project_id = :pid AND LOWER(brand_name) = LOWER(:old_name)"
+            ),
+            {"canonical": canonical_name, "pid": project_id, "old_name": old_name},
+        )
+    fetch_project_brands.clear()
+    st.cache_data.clear()
+    return n_updated
+
+
 # ---------------------------------------------------------------------------
 # Load data
 # ---------------------------------------------------------------------------
@@ -248,6 +286,51 @@ with tab_saved:
                                 st.cache_data.clear()
                                 st.rerun()
 
+                # Canonical name — inline expander per brand
+                canon_current = str(row.get("canonical_name") or "")
+                with st.expander(
+                    f"↳ Canonical name{': **' + canon_current + '**' if canon_current else ' (not set)'}",
+                    expanded=False,
+                ):
+                    col_canon, col_canon_btn = st.columns([5, 2])
+                    with col_canon:
+                        canon_input = st.text_input(
+                            "Map to canonical name",
+                            value=canon_current,
+                            key=f"canon_input_{bkey}",
+                            placeholder="e.g. Locauto  (leave empty to clear)",
+                            label_visibility="collapsed",
+                        )
+                    with col_canon_btn:
+                        if st.button("Apply & normalize", key=f"canon_btn_{bkey}",
+                                     use_container_width=True, type="primary"):
+                            canon_stripped = canon_input.strip()
+                            if canon_stripped == "":
+                                # Clear canonical
+                                with get_engine().begin() as conn:
+                                    conn.execute(
+                                        text("UPDATE project_brands SET canonical_name = NULL "
+                                             "WHERE project_id = :pid AND LOWER(brand_name) = LOWER(:name)"),
+                                        {"pid": project_id, "name": bname},
+                                    )
+                                fetch_project_brands.clear()
+                                st.success("Canonical name cleared.")
+                                st.rerun()
+                            else:
+                                n = _apply_canonical(bname, canon_stripped)
+                                if n > 0:
+                                    st.success(
+                                        f"✅ Remapped **{n}** mention(s) from "
+                                        f"**{bname}** → **{canon_stripped}**"
+                                    )
+                                else:
+                                    st.info("Canonical name saved. No existing mentions to remap.")
+                                st.rerun()
+                    st.caption(
+                        "Setting a canonical name remaps all historical `brand_mentions` for this project "
+                        "from the current name to the canonical. Future runs will also use this mapping."
+                    )
+
             st.markdown("---")
 
     # Add brand manually
@@ -321,16 +404,33 @@ with tab_sugg:
                 if search_b.strip() else sugg_df
             ).reset_index(drop=True)
 
+            # Action column: "New brand" (add with type) OR "Merge into" (remap to existing)
+            saved_brand_names = sorted(edit_df["brand_name"].tolist()) if not edit_df.empty else []
+            merge_options = ["— Add as new brand —"] + saved_brand_names
+
+            display_b["_add"]        = False
+            display_b["brand_type"]  = "—"
+            display_b["merge_into"]  = "— Add as new brand —"
+
             edited_b = st.data_editor(
-                display_b[["_add", "brand_name", "brand_type"]],
+                display_b[["_add", "brand_name", "brand_type", "merge_into"]],
                 column_config={
-                    "_add":       st.column_config.CheckboxColumn("Add?", width="small"),
-                    "brand_name": st.column_config.TextColumn("Brand", width="large"),
+                    "_add":       st.column_config.CheckboxColumn("Select?", width="small"),
+                    "brand_name": st.column_config.TextColumn("Detected brand", width="large"),
                     "brand_type": st.column_config.SelectboxColumn(
-                        "Type",
+                        "Type (if new)",
                         options=_BRAND_TYPE_OPTIONS,
                         required=True,
-                        help="Assign a type before adding.",
+                        help="Used only when adding as a new brand.",
+                    ),
+                    "merge_into": st.column_config.SelectboxColumn(
+                        "Merge into existing brand",
+                        options=merge_options,
+                        required=True,
+                        help=(
+                            "Select an existing saved brand to remap all mentions of this "
+                            "detected name onto it — or leave as '— Add as new brand —' to add it fresh."
+                        ),
                     ),
                 },
                 disabled=["brand_name"],
@@ -340,32 +440,56 @@ with tab_sugg:
                 key=f"brand_editor_b_{project_id}_{search_b}",
             )
 
-            if st.button("Add selected to Saved Brands", type="primary", key="add_suggested_btn"):
-                to_add = edited_b[edited_b["_add"] == True]  # noqa: E712
-                if to_add.empty:
-                    st.warning("No brands selected. Check the 'Add?' column.")
+            st.caption(
+                "**Merge into existing brand**: remaps all historical `brand_mentions` of the detected "
+                "name onto the chosen saved brand. Use this to consolidate variants like "
+                "*Locauto Group* → *Locauto*."
+            )
+
+            if st.button("Apply selected", type="primary", key="add_suggested_btn"):
+                to_process = edited_b[edited_b["_add"] == True]  # noqa: E712
+                if to_process.empty:
+                    st.warning("No brands selected. Check the 'Select?' column.")
                 else:
                     existing_lower = set(edit_df["brand_name"].str.lower()) if not edit_df.empty else set()
-                    new_rows = [
-                        {
-                            "brand_name":    str(r["brand_name"]),
-                            "is_own_brand":  str(r["brand_type"]) == "Own Brand",
-                            "is_competitor": str(r["brand_type"]) == "Competitor",
-                            "is_excluded":   str(r["brand_type"]) == "Excluded",
-                            "canonical_name": None,
-                        }
-                        for _, r in to_add.iterrows()
-                        if str(r["brand_name"]).lower() not in existing_lower
-                    ]
-                    if not new_rows:
-                        st.info("All selected brands are already in your saved list.")
-                    else:
-                        own_in_new = sum(1 for r in new_rows if r["is_own_brand"])
-                        current_own = int((edit_df["brand_type"] == "Own Brand").sum()) if not edit_df.empty else 0
-                        if current_own + own_in_new > 1:
-                            st.error("Only 1 Own Brand allowed per project. Deselect extra Own Brand entries.")
+                    new_rows   = []
+                    merged     = []
+                    errors     = []
+
+                    for _, r in to_process.iterrows():
+                        detected  = str(r["brand_name"])
+                        merge_tgt = str(r["merge_into"])
+                        btype     = str(r["brand_type"])
+
+                        if merge_tgt != "— Add as new brand —":
+                            # Merge: remap brand_mentions detected → merge_tgt
+                            n = _apply_canonical(detected, merge_tgt)
+                            merged.append((detected, merge_tgt, n))
                         else:
+                            # Add as new brand
+                            if detected.lower() not in existing_lower:
+                                new_rows.append({
+                                    "brand_name":    detected,
+                                    "is_own_brand":  btype == "Own Brand",
+                                    "is_competitor": btype == "Competitor",
+                                    "is_excluded":   btype == "Excluded",
+                                    "canonical_name": None,
+                                })
+
+                    # Validate own brand count for new rows
+                    own_in_new  = sum(1 for r in new_rows if r["is_own_brand"])
+                    current_own = int((edit_df["brand_type"] == "Own Brand").sum()) if not edit_df.empty else 0
+                    if current_own + own_in_new > 1:
+                        st.error("Only 1 Own Brand allowed per project. Deselect extra Own Brand entries.")
+                    else:
+                        if new_rows:
                             _insert_brands(new_rows)
-                            st.cache_data.clear()
-                            st.success(f"✅ {len(new_rows)} brand(s) added to Saved Brands.")
-                            st.rerun()
+                        st.cache_data.clear()
+
+                        msgs = []
+                        if new_rows:
+                            msgs.append(f"**{len(new_rows)}** brand(s) added to Saved Brands.")
+                        for det, tgt, n in merged:
+                            msgs.append(f"**{det}** → **{tgt}**: {n} mention(s) remapped.")
+                        st.success("✅ " + "  \n".join(msgs))
+                        st.rerun()
