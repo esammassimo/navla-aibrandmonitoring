@@ -303,6 +303,23 @@ else:
                 f"Estimated total workers: **{n_active * (len(iterable_selected) * iterations + len([l for l in selected_llms if l not in _ITERABLE_LLMS]))}**"
             )
 
+        collect = st.radio(
+            "Extract from responses",
+            options=["Brands & Sources", "Brands only", "Sources only"],
+            index=0,
+            horizontal=True,
+            help=(
+                "Brands & Sources: extract brand mentions and cited URLs (default). "
+                "Brands only: extract brand mentions via GPT-4o-mini, skip URL storage. "
+                "Sources only: save cited URLs only, skip brand extraction."
+            ),
+        )
+        _COLLECT_MAP = {
+            "Brands & Sources": "both",
+            "Brands only":      "brands",
+            "Sources only":     "sources",
+        }
+
         run_btn = st.form_submit_button("▶ Start run", type="primary", disabled=(n_active == 0))
 
     if run_btn:
@@ -325,6 +342,7 @@ else:
                     triggered_by="manual",
                     progress_callback=_progress_cb,
                     iterations=int(iterations),
+                    collect=_COLLECT_MAP[collect],
                 )
                 progress_bar.progress(1.0, text="Run completed.")
                 status_text.empty()
