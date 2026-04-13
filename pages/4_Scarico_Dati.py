@@ -303,7 +303,25 @@ else:
                 f"Totale worker stimati: **{n_active * (len(iterable_selected) * iterations + len([l for l in selected_llms if l not in _ITERABLE_LLMS]))}**"
             )
 
-        run_btn = st.form_submit_button("▶ Avvia run", type="primary", disabled=(n_active == 0))
+        collect = st.radio(
+            "Extract from responses",
+            options=["Brands & Sources", "Brands only", "Sources only"],
+            index=0,
+            horizontal=True,
+            help=(
+                "Brands only: extract brand mentions via GPT-4o-mini (faster, no URL storage). "
+                "Sources only: save cited URLs only (no brand extraction). "
+                "Brands & Sources: extract both (default)."
+            ),
+        )
+        # Map label → internal value for pipeline
+        _COLLECT_MAP = {
+            "Brands & Sources": "both",
+            "Brands only":      "brands",
+            "Sources only":     "sources",
+        }
+
+        run_btn = st.form_submit_button("▶ Start run", type="primary", disabled=(n_active == 0))
 
     if run_btn:
         if not selected_llms:
@@ -325,6 +343,7 @@ else:
                     triggered_by="manual",
                     progress_callback=_progress_cb,
                     iterations=int(iterations),
+                    collect=_COLLECT_MAP[collect],
                 )
                 progress_bar.progress(1.0, text="Run completato.")
                 status_text.empty()

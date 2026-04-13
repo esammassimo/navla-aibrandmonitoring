@@ -690,6 +690,7 @@ def _worker(
     language: str,
     delay: float,
     project_brands: list[dict] | None = None,
+    collect: str = "both",
 ) -> None:
     """Execute one (question × LLM) unit of work."""
     try:
@@ -720,9 +721,11 @@ def _worker(
 
         # --- Extract sources and brands (only for valid responses) ---
         if _is_valid_response(response_text):
-            _db_insert_sources(response_id, sources)
-            brands = _extract_brands(response_text, project_brands=project_brands)
-            _db_insert_brands(response_id, brands)
+            if collect in ("sources", "both"):
+                _db_insert_sources(response_id, sources)
+            if collect in ("brands", "both"):
+                brands = _extract_brands(response_text, project_brands=project_brands)
+                _db_insert_brands(response_id, brands)
 
         _db_complete_worker(worker_id, "completed")
 
@@ -750,6 +753,7 @@ def start_run(
     triggered_by: str = "manual",
     progress_callback: Optional[Callable[[int, int], None]] = None,
     iterations: int = 1,
+    collect: str = "both",
 ) -> str:
     """
     Create a run, launch all workers in parallel, wait for completion.
@@ -760,8 +764,9 @@ def start_run(
         triggered_by:      'manual' or 'scheduled'.
         progress_callback: Optional callback(completed, total) called after each worker.
         iterations:        Number of sequential repetitions for iterable LLMs
-                           (chatgpt, claude, gemini, perplexity). aio and aim
+                           (ChatGPT, Claude, Gemini, Perplexity). AI Overviews and AI Mode
                            always run once. Min 1, no upper limit enforced here.
+        collect:           What to extract from responses: 'brands', 'sources', or 'both'.
 
     Returns:
         run_id as string.
@@ -870,7 +875,7 @@ def start_run(
                 fut = executor.submit(
                     _worker,
                     run_id, worker_id, ai_question_id, question,
-                    llm, country, language, delay, project_brands_list,
+                    llm, country, language, delay, project_brands_list, collect,
                 )
                 futures[fut] = worker_id
 
@@ -976,7 +981,7 @@ def retry_failed_workers(
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
             executor.submit(
-                _worker, run_id, wid, qid, question, llm, country, language, delay, project_brands_list
+                _worker, run_id, wid, qid, question, llm, country, language, delay, project_brands_list, "both"
             ): wid
             for wid, qid, question, llm in new_workers
         }
