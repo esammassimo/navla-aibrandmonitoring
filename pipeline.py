@@ -795,6 +795,7 @@ def start_run(
     triggered_by: str = "manual",
     progress_callback: Optional[Callable[[int, int], None]] = None,
     iterations: int = 1,
+    collect: str = "both",
 ) -> str:
     """
     Create a run, launch all workers in parallel, wait for completion.
@@ -807,6 +808,7 @@ def start_run(
         iterations:        Number of sequential repetitions for iterable LLMs
                            (chatgpt, claude, gemini, perplexity). aio and aim
                            always run once. Min 1, no upper limit enforced here.
+        collect:           What to extract from responses: 'brands', 'sources', or 'both'.
 
     Returns:
         run_id as string.
