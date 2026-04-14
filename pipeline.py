@@ -768,8 +768,17 @@ def _worker(
             response_text, sources, model_name = f"ERROR: unknown LLM '{llm}'", [], ""
 
         if not _is_valid_response(response_text):
-            rl.warning("[%s] INVALID response for question='%s' — value: %s",
-                       llm, q_short, str(response_text)[:120])
+            if response_text is None:
+                # None = no AI feature shown by Google for this query (expected)
+                rl.info("[%s] NO RESULT — feature not shown for question='%s'", llm, q_short)
+            elif response_text == "DISABLED":
+                rl.info("[%s] DISABLED — API key not configured", llm)
+            elif str(response_text).startswith("ERROR:"):
+                rl.error("[%s] API ERROR for question='%s' — %s",
+                         llm, q_short, str(response_text)[:200])
+            else:
+                rl.warning("[%s] INVALID response for question='%s' — value: %s",
+                           llm, q_short, str(response_text)[:120])
         else:
             rl.info("[%s] OK  model=%s  sources=%d  chars=%d  question='%s'",
                     llm, model_name, len(sources), len(response_text or ""), q_short)
