@@ -95,7 +95,7 @@ Text:
 {response_text}
 """
 
-GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash"]
 
 # Category label stored in DB alongside llm name — used by Looker Studio
 LLM_CATEGORY: dict[str, str] = {
@@ -309,7 +309,8 @@ def _call_gemini(question: str, country: str, language: str) -> tuple[str, list[
                 json=payload,
                 timeout=60,
             )
-            if resp.status_code == 404:
+            if resp.status_code in (404, 400):
+                logger.warning("Gemini %s returned %d — skipping", model, resp.status_code)
                 continue  # Try next model
             resp.raise_for_status()
             data = resp.json()
@@ -768,17 +769,8 @@ def _worker(
             response_text, sources, model_name = f"ERROR: unknown LLM '{llm}'", [], ""
 
         if not _is_valid_response(response_text):
-            if response_text is None:
-                # None = no AI feature shown by Google for this query (expected)
-                rl.info("[%s] NO RESULT — feature not shown for question='%s'", llm, q_short)
-            elif response_text == "DISABLED":
-                rl.info("[%s] DISABLED — API key not configured", llm)
-            elif str(response_text).startswith("ERROR:"):
-                rl.error("[%s] API ERROR for question='%s' — %s",
-                         llm, q_short, str(response_text)[:200])
-            else:
-                rl.warning("[%s] INVALID response for question='%s' — value: %s",
-                           llm, q_short, str(response_text)[:120])
+            rl.warning("[%s] INVALID response for question='%s' — value: %s",
+                       llm, q_short, str(response_text)[:120])
         else:
             rl.info("[%s] OK  model=%s  sources=%d  chars=%d  question='%s'",
                     llm, model_name, len(sources), len(response_text or ""), q_short)
