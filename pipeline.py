@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -27,6 +28,38 @@ except ImportError:
         tomllib = None  # type: ignore
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Run-scoped file logger
+# ---------------------------------------------------------------------------
+LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
+
+
+def _get_run_logger(run_id: str) -> logging.Logger:
+    """Return a logger that writes to logs/run_{run_id}.txt."""
+    os.makedirs(LOG_DIR, exist_ok=True)
+    log_path = os.path.join(LOG_DIR, f"run_{run_id}.txt")
+
+    run_logger = logging.getLogger(f"run.{run_id}")
+    run_logger.setLevel(logging.DEBUG)
+
+    # Avoid adding duplicate handlers on reruns
+    if not run_logger.handlers:
+        fh = logging.FileHandler(log_path, encoding="utf-8")
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        ))
+        run_logger.addHandler(fh)
+        run_logger.propagate = False
+
+    return run_logger
+
+
+def get_run_log_path(run_id: str) -> str:
+    """Return the path to the log file for a given run_id."""
+    return os.path.join(LOG_DIR, f"run_{run_id}.txt")
 
 # ---------------------------------------------------------------------------
 # System prompt used for all primary LLMs
@@ -684,26 +717,40 @@ def _worker(
     language: str,
     delay: float,
     project_brands: list[dict] | None = None,
+    collect: str = "both",
+    run_logger: logging.Logger | None = None,
 ) -> None:
     """Execute one (question × LLM) unit of work."""
+    rl = run_logger or logger
+    q_short = question[:80]
+
     try:
         _db_update_worker_running(worker_id)
+        rl.info("[%s] START  question='%s'", llm, q_short)
 
         # --- Call the appropriate LLM ---
-        if llm == "chatgpt":
+        llm_key = _llm_key(llm)
+        if llm_key == "chatgpt":
             response_text, sources, model_name = _call_chatgpt(question, country)
-        elif llm == "claude":
+        elif llm_key == "claude":
             response_text, sources, model_name = _call_claude(question)
-        elif llm == "gemini":
+        elif llm_key == "gemini":
             response_text, sources, model_name = _call_gemini(question, country, language)
-        elif llm == "perplexity":
+        elif llm_key == "perplexity":
             response_text, sources, model_name = _call_perplexity(question)
-        elif llm == "aio":
+        elif llm_key == "aio":
             response_text, sources, model_name = _call_aio(question, country, language)
-        elif llm == "aim":
+        elif llm_key == "aim":
             response_text, sources, model_name = _call_aim(question, country, language)
         else:
             response_text, sources, model_name = f"ERROR: unknown LLM '{llm}'", [], ""
+
+        if not _is_valid_response(response_text):
+            rl.warning("[%s] INVALID response for question='%s' — value: %s",
+                       llm, q_short, str(response_text)[:120])
+        else:
+            rl.info("[%s] OK  model=%s  sources=%d  chars=%d  question='%s'",
+                    llm, model_name, len(sources), len(response_text or ""), q_short)
 
         # --- Persist response ---
         response_id = _db_insert_response(
@@ -712,14 +759,20 @@ def _worker(
 
         # --- Extract sources and brands (only for valid responses) ---
         if _is_valid_response(response_text):
-            _db_insert_sources(response_id, sources)
-            brands = _extract_brands(response_text, project_brands=project_brands)
-            _db_insert_brands(response_id, brands)
+            if collect in ("sources", "both"):
+                _db_insert_sources(response_id, sources)
+                rl.info("[%s] Saved %d source(s)  question='%s'", llm, len(sources), q_short)
+            if collect in ("brands", "both"):
+                brands = _extract_brands(response_text, project_brands=project_brands)
+                _db_insert_brands(response_id, brands)
+                rl.info("[%s] Saved %d brand(s)  question='%s'", llm, len(brands), q_short)
 
         _db_complete_worker(worker_id, "completed")
+        rl.info("[%s] DONE  question='%s'", llm, q_short)
 
     except Exception as exc:
         logger.error("Worker %s (%s × %s) failed: %s", worker_id, llm, question[:60], exc)
+        rl.error("[%s] FAILED  question='%s'  error=%s", llm, q_short, str(exc))
         _db_complete_worker(worker_id, "failed", str(exc)[:500])
 
     finally:
@@ -789,6 +842,9 @@ def start_run(
     )
     project_brands_list: list[dict] = pb_df.to_dict("records") if not pb_df.empty else []
 
+    # Placeholder run_id for logger — will be updated after DB insert
+    _tmp_run_id = "pending"
+
     iterations = max(1, int(iterations))
 
     # Iterable LLMs run N times; aio/aim always run once
@@ -817,6 +873,14 @@ def start_run(
             },
         ).fetchone()
     run_id = str(row[0])
+
+    # --- Initialize run-scoped logger ---
+    run_log = _get_run_logger(run_id)
+    run_log.info("=" * 70)
+    run_log.info("RUN STARTED  id=%s  project=%s  triggered_by=%s", run_id, project_id, triggered_by)
+    run_log.info("LLMs=%s  iterations=%d  collect=%s", llms, iterations, collect)
+    run_log.info("Questions=%d  Total workers=%d", len(questions_df), total)
+    run_log.info("=" * 70)
 
     # --- Create run_workers ---
     # Each (question × llm) is repeated _effective_iterations(llm) times sequentially.
@@ -863,7 +927,7 @@ def start_run(
                 fut = executor.submit(
                     _worker,
                     run_id, worker_id, ai_question_id, question,
-                    llm, country, language, delay, project_brands_list,
+                    llm, country, language, delay, project_brands_list, collect, run_log,
                 )
                 futures[fut] = worker_id
 
@@ -880,6 +944,12 @@ def start_run(
 
     # --- Finalise run ---
     _db_finalize_run(run_id)
+    run_log.info("=" * 70)
+    run_log.info("RUN FINISHED  id=%s  status=see DB", run_id)
+    run_log.info("=" * 70)
+    # Close file handler to flush
+    for h in run_log.handlers:
+        h.flush()
     return run_id
 
 

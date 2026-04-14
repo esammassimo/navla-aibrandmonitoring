@@ -25,4 +25,6 @@ Thumbs.db
 .idea/
 
 # Logs
+logs/
 *.log
+

@@ -9,6 +9,7 @@ import streamlit as st
 from sqlalchemy import text
 
 import pipeline as pl
+from pipeline import get_run_log_path
 from utils import (
     LLM_GROUP,
     fetch_ai_questions,
@@ -277,6 +278,7 @@ else:
     st.caption(f"Domande attive: **{n_active}**")
 
     with st.form("form_manual_run"):
+        st.markdown("**LLMs to query**")
         col_llm_f, col_ai_f = st.columns(2)
         with col_llm_f:
             sel_llms_llm = st.multiselect(
@@ -436,6 +438,74 @@ else:
         )
 
 # ===========================================================================
+# SECTION 2b — Run Log
+# ===========================================================================
+st.divider()
+st.subheader("Run Log")
+
+if runs_df.empty:
+    st.info("No runs available.")
+else:
+    log_run_opts = {
+        f"{str(row['id'])[:8]}… — {row['status']} — {str(row['started_at'])[:16]}": str(row["id"])
+        for _, row in runs_df.iterrows()
+    }
+    selected_log_run = st.selectbox(
+        "Select run to view log",
+        options=list(log_run_opts.keys()),
+        key="log_run_select",
+    )
+    selected_log_run_id = log_run_opts[selected_log_run]
+    log_path = get_run_log_path(selected_log_run_id)
+
+    if not __import__("os").path.exists(log_path):
+        st.info(
+            "No log file found for this run. "
+            "Log files are generated starting from runs executed after this feature was deployed."
+        )
+    else:
+        log_content = open(log_path, encoding="utf-8").read()
+        n_lines = log_content.count("\n")
+
+        # Summary badges
+        n_errors   = log_content.count("[ERROR]")
+        n_warnings = log_content.count("[WARNING]")
+        n_info     = log_content.count("[INFO]")
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Log lines",  n_lines)
+        c2.metric("INFO",       n_info)
+        c3.metric("WARNING",    n_warnings,  delta=None if n_warnings == 0 else f"{n_warnings}")
+        c4.metric("ERROR",      n_errors,    delta=None if n_errors   == 0 else f"{n_errors}")
+
+        # Filter options
+        log_filter = st.radio(
+            "Filter",
+            options=["All", "INFO", "WARNING", "ERROR"],
+            horizontal=True,
+            key="log_filter",
+            label_visibility="collapsed",
+        )
+
+        filtered_lines = [
+            line for line in log_content.splitlines()
+            if log_filter == "All" or f"[{log_filter}]" in line
+        ]
+        filtered_text = "\n".join(filtered_lines)
+
+        # Viewer
+        st.code(filtered_text or "No entries match the selected filter.", language=None)
+
+        # Download button
+        st.download_button(
+            label="⬇ Download log (.txt)",
+            data=log_content,
+            file_name=f"run_{selected_log_run_id[:8]}.txt",
+            mime="text/plain",
+            key="download_log_btn",
+        )
+
+# ===========================================================================
 # SECTION 3 — Retry worker falliti
 # ===========================================================================
 st.divider()
@@ -577,6 +647,7 @@ with st.form("form_schedule"):
             help="Usato per frequenza bimensile e mensile.",
         )
 
+    st.markdown("**LLMs to query in automatic runs**")
     col_sched_a, col_sched_b = st.columns(2)
     with col_sched_a:
         sched_llms_llm = st.multiselect(
