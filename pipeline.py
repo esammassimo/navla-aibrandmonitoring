@@ -112,6 +112,28 @@ def _llm_category(llm: str) -> str:
     return LLM_CATEGORY.get(llm, "LLM")
 
 
+# Mapping from display name → internal key (for dispatch in _worker)
+LLM_DISPLAY_NAMES: dict[str, str] = {
+    "chatgpt":    "ChatGPT",
+    "claude":     "Claude",
+    "gemini":     "Gemini",
+    "perplexity": "Perplexity",
+    "aio":        "AI Overviews",
+    "aim":        "AI Mode",
+}
+LLM_KEYS: dict[str, str] = {v: k for k, v in LLM_DISPLAY_NAMES.items()}
+
+
+def _llm_display(llm: str) -> str:
+    """Convert internal key → display name for DB storage."""
+    return LLM_DISPLAY_NAMES.get(llm, llm)
+
+
+def _llm_key(display: str) -> str:
+    """Convert display name → internal key for API dispatch."""
+    return LLM_KEYS.get(display, display.lower())
+
+
 # ===========================================================================
 # Helpers
 # ===========================================================================
