@@ -201,6 +201,22 @@ def require_login(cookie_manager=None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# LLM category mapping — used by UI filters and charts across all pages
+# ---------------------------------------------------------------------------
+LLM_CATEGORIES: dict[str, str] = {
+    "ChatGPT":      "LLM",
+    "Claude":       "LLM",
+    "Gemini":       "LLM",
+    "Perplexity":   "LLM",
+    "AI Overviews": "AI Features",
+    "AI Mode":      "AI Features",
+}
+LLM_GROUP: dict[str, list[str]] = {
+    "LLM":         ["ChatGPT", "Claude", "Gemini", "Perplexity"],
+    "AI Features": ["AI Overviews", "AI Mode"],
+}
+
 # FilterState
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
@@ -331,8 +347,20 @@ def render_inline_filters(project_id: Optional[str]) -> FilterState:
         )
 
     with col_llm:
-        llm_opts = ["ChatGPT", "Claude", "Gemini", "Perplexity", "AI Overviews", "AI Mode"]
-        sel_llms = st.multiselect("LLM", llm_opts, key="inline_filter_llms")
+        col_llm_a, col_llm_b = st.columns(2)
+        with col_llm_a:
+            sel_llms_llm = st.multiselect(
+                "LLM",
+                options=LLM_GROUP["LLM"],
+                key="inline_filter_llms_llm",
+            )
+        with col_llm_b:
+            sel_llms_ai = st.multiselect(
+                "AI Features",
+                options=LLM_GROUP["AI Features"],
+                key="inline_filter_llms_ai",
+            )
+        sel_llms = sel_llms_llm + sel_llms_ai
 
     with col_cluster:
         sel_clusters: list[str] = []

@@ -64,27 +64,6 @@ Text:
 
 GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
 
-# Mapping from internal identifier → display name stored in DB
-LLM_DISPLAY_NAMES: dict[str, str] = {
-    "chatgpt":    "ChatGPT",
-    "claude":     "Claude",
-    "gemini":     "Gemini",
-    "perplexity": "Perplexity",
-    "aio":        "AI Overviews",
-    "aim":        "AI Mode",
-}
-
-def _llm_display(llm: str) -> str:
-    """Return the canonical display name for a given LLM identifier."""
-    return LLM_DISPLAY_NAMES.get(llm, llm)
-
-# Reverse mapping: display name → internal key (for UI → pipeline dispatch)
-LLM_KEYS: dict[str, str] = {v: k for k, v in LLM_DISPLAY_NAMES.items()}
-
-def _llm_key(display: str) -> str:
-    """Convert a display name back to its internal identifier for dispatch."""
-    return LLM_KEYS.get(display, display.lower())
-
 
 # ===========================================================================
 # Helpers
@@ -601,7 +580,7 @@ def _db_insert_response(
                 "run_id": run_id,
                 "wid": worker_id,
                 "qid": ai_question_id,
-                "llm": _llm_display(llm),
+                "llm": llm,
                 "model": model,
                 "text": response_text,
                 "rdate": date.today(),
@@ -690,26 +669,23 @@ def _worker(
     language: str,
     delay: float,
     project_brands: list[dict] | None = None,
-    collect: str = "both",
 ) -> None:
     """Execute one (question × LLM) unit of work."""
     try:
         _db_update_worker_running(worker_id)
 
         # --- Call the appropriate LLM ---
-        # llm may be a display name (e.g. "ChatGPT") — convert to internal key for dispatch
-        llm_key = _llm_key(llm)
-        if llm_key == "chatgpt":
+        if llm == "chatgpt":
             response_text, sources, model_name = _call_chatgpt(question, country)
-        elif llm_key == "claude":
+        elif llm == "claude":
             response_text, sources, model_name = _call_claude(question)
-        elif llm_key == "gemini":
+        elif llm == "gemini":
             response_text, sources, model_name = _call_gemini(question, country, language)
-        elif llm_key == "perplexity":
+        elif llm == "perplexity":
             response_text, sources, model_name = _call_perplexity(question)
-        elif llm_key == "aio":
+        elif llm == "aio":
             response_text, sources, model_name = _call_aio(question, country, language)
-        elif llm_key == "aim":
+        elif llm == "aim":
             response_text, sources, model_name = _call_aim(question, country, language)
         else:
             response_text, sources, model_name = f"ERROR: unknown LLM '{llm}'", [], ""
@@ -721,11 +697,9 @@ def _worker(
 
         # --- Extract sources and brands (only for valid responses) ---
         if _is_valid_response(response_text):
-            if collect in ("sources", "both"):
-                _db_insert_sources(response_id, sources)
-            if collect in ("brands", "both"):
-                brands = _extract_brands(response_text, project_brands=project_brands)
-                _db_insert_brands(response_id, brands)
+            _db_insert_sources(response_id, sources)
+            brands = _extract_brands(response_text, project_brands=project_brands)
+            _db_insert_brands(response_id, brands)
 
         _db_complete_worker(worker_id, "completed")
 
@@ -744,7 +718,7 @@ def _worker(
 # ===========================================================================
 
 # LLMs that support multiple iterations (sequential repetitions of the same prompt)
-_ITERABLE_LLMS = {"ChatGPT", "Claude", "Gemini", "Perplexity"}
+_ITERABLE_LLMS = {"ChatGPT", "Claude", "Gemini", "Perplexity"}  # display names (UI sends these)
 
 
 def start_run(
@@ -753,7 +727,6 @@ def start_run(
     triggered_by: str = "manual",
     progress_callback: Optional[Callable[[int, int], None]] = None,
     iterations: int = 1,
-    collect: str = "both",
 ) -> str:
     """
     Create a run, launch all workers in parallel, wait for completion.
@@ -764,9 +737,8 @@ def start_run(
         triggered_by:      'manual' or 'scheduled'.
         progress_callback: Optional callback(completed, total) called after each worker.
         iterations:        Number of sequential repetitions for iterable LLMs
-                           (ChatGPT, Claude, Gemini, Perplexity). AI Overviews and AI Mode
+                           (chatgpt, claude, gemini, perplexity). aio and aim
                            always run once. Min 1, no upper limit enforced here.
-        collect:           What to extract from responses: 'brands', 'sources', or 'both'.
 
     Returns:
         run_id as string.
@@ -845,7 +817,7 @@ def start_run(
                             "INSERT INTO run_workers (run_id, ai_question_id, llm, status) "
                             "VALUES (:rid, :qid, :llm, 'pending') RETURNING id"
                         ),
-                        {"rid": run_id, "qid": str(qrow["id"]), "llm": _llm_display(llm)},
+                        {"rid": run_id, "qid": str(qrow["id"]), "llm": llm},
                     ).fetchone()
                     worker_ids.append((str(wrow[0]), str(qrow["id"]), str(qrow["question"]), llm, iter_idx))
 
@@ -875,7 +847,7 @@ def start_run(
                 fut = executor.submit(
                     _worker,
                     run_id, worker_id, ai_question_id, question,
-                    llm, country, language, delay, project_brands_list, collect,
+                    llm, country, language, delay, project_brands_list,
                 )
                 futures[fut] = worker_id
 
@@ -961,7 +933,7 @@ def retry_failed_workers(
                 {
                     "rid": run_id,
                     "qid": str(row["ai_question_id"]),
-                    "llm": _llm_display(str(row["llm"])),
+                    "llm": str(row["llm"]),
                     "attempt": int(row["attempt"]) + 1,
                 },
             ).fetchone()
@@ -981,7 +953,7 @@ def retry_failed_workers(
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
             executor.submit(
-                _worker, run_id, wid, qid, question, llm, country, language, delay, project_brands_list, "both"
+                _worker, run_id, wid, qid, question, llm, country, language, delay, project_brands_list
             ): wid
             for wid, qid, question, llm in new_workers
         }
