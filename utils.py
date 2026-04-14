@@ -333,11 +333,11 @@ def render_inline_filters(project_id: Optional[str]) -> FilterState:
     customer_id: Optional[str] = st.session_state.get("customer_id")
 
     today = date.today()
-    col_date, col_llm, col_cluster = st.columns([2, 2, 2])
+    col_date, col_llm, col_ai, col_cluster = st.columns([2, 2, 2, 2])
 
     with col_date:
         dr = st.date_input(
-            "Periodo",
+            "Period",
             value=(today - timedelta(days=30), today),
             max_value=today,
             key="inline_filter_date",
@@ -347,20 +347,20 @@ def render_inline_filters(project_id: Optional[str]) -> FilterState:
         )
 
     with col_llm:
-        col_llm_a, col_llm_b = st.columns(2)
-        with col_llm_a:
-            sel_llms_llm = st.multiselect(
-                "LLM",
-                options=LLM_GROUP["LLM"],
-                key="inline_filter_llms_llm",
-            )
-        with col_llm_b:
-            sel_llms_ai = st.multiselect(
-                "AI Features",
-                options=LLM_GROUP["AI Features"],
-                key="inline_filter_llms_ai",
-            )
-        sel_llms = sel_llms_llm + sel_llms_ai
+        sel_llms_llm = st.multiselect(
+            "LLM",
+            options=LLM_GROUP["LLM"],
+            key="inline_filter_llms_llm",
+        )
+
+    with col_ai:
+        sel_llms_ai = st.multiselect(
+            "AI Features",
+            options=LLM_GROUP["AI Features"],
+            key="inline_filter_llms_ai",
+        )
+
+    sel_llms = sel_llms_llm + sel_llms_ai
 
     with col_cluster:
         sel_clusters: list[str] = []

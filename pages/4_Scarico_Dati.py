@@ -277,7 +277,6 @@ else:
     st.caption(f"Domande attive: **{n_active}**")
 
     with st.form("form_manual_run"):
-        st.markdown("**LLMs to query**")
         col_llm_f, col_ai_f = st.columns(2)
         with col_llm_f:
             sel_llms_llm = st.multiselect(
@@ -578,7 +577,6 @@ with st.form("form_schedule"):
             help="Usato per frequenza bimensile e mensile.",
         )
 
-    st.markdown("**LLMs to query in automatic runs**")
     col_sched_a, col_sched_b = st.columns(2)
     with col_sched_a:
         sched_llms_llm = st.multiselect(
