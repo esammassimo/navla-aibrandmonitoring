@@ -309,9 +309,17 @@ def _call_gemini(question: str, country: str, language: str) -> tuple[str, list[
                 json=payload,
                 timeout=60,
             )
-            if resp.status_code in (404, 400):
-                logger.warning("Gemini %s returned %d — skipping", model, resp.status_code)
-                continue  # Try next model
+            if resp.status_code == 404:
+                logger.warning("Gemini %s returned 404 — skipping", model)
+                continue
+            if resp.status_code == 400:
+                try:
+                    err_body = resp.json()
+                except Exception:
+                    err_body = resp.text[:300]
+                logger.error("Gemini %s returned 400 — body: %s", model, str(err_body)[:500])
+                last_exc = Exception(f"400 Bad Request: {str(err_body)[:300]}")
+                continue
             resp.raise_for_status()
             data = resp.json()
 
