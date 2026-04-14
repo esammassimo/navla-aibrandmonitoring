@@ -64,6 +64,20 @@ Text:
 
 GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
 
+# Category label stored in DB alongside llm name — used by Looker Studio
+LLM_CATEGORY: dict[str, str] = {
+    "ChatGPT":      "LLM",
+    "Claude":       "LLM",
+    "Gemini":       "LLM",
+    "Perplexity":   "LLM",
+    "AI Overviews": "AI Feature",
+    "AI Mode":      "AI Feature",
+}
+
+def _llm_category(llm: str) -> str:
+    """Return the category label ('LLM' or 'AI Feature') for a given display name."""
+    return LLM_CATEGORY.get(llm, "LLM")
+
 
 # ===========================================================================
 # Helpers
@@ -572,18 +586,19 @@ def _db_insert_response(
         row = conn.execute(
             text(
                 "INSERT INTO ai_responses "
-                "(run_id, run_worker_id, ai_question_id, llm, model, response_text, run_date) "
-                "VALUES (:run_id, :wid, :qid, :llm, :model, :text, :rdate) "
+                "(run_id, run_worker_id, ai_question_id, llm, llm_category, model, response_text, run_date) "
+                "VALUES (:run_id, :wid, :qid, :llm, :llm_category, :model, :text, :rdate) "
                 "RETURNING id"
             ),
             {
-                "run_id": run_id,
-                "wid": worker_id,
-                "qid": ai_question_id,
-                "llm": llm,
-                "model": model,
-                "text": response_text,
-                "rdate": date.today(),
+                "run_id":       run_id,
+                "wid":          worker_id,
+                "qid":          ai_question_id,
+                "llm":          llm,
+                "llm_category": _llm_category(llm),
+                "model":        model,
+                "text":         response_text,
+                "rdate":        date.today(),
             },
         ).fetchone()
     return str(row[0])
@@ -814,10 +829,11 @@ def start_run(
                 for iter_idx in range(n_iter):
                     wrow = conn.execute(
                         text(
-                            "INSERT INTO run_workers (run_id, ai_question_id, llm, status) "
-                            "VALUES (:rid, :qid, :llm, 'pending') RETURNING id"
+                            "INSERT INTO run_workers (run_id, ai_question_id, llm, llm_category, status) "
+                            "VALUES (:rid, :qid, :llm, :llm_category, 'pending') RETURNING id"
                         ),
-                        {"rid": run_id, "qid": str(qrow["id"]), "llm": llm},
+                        {"rid": run_id, "qid": str(qrow["id"]), "llm": llm,
+                         "llm_category": _llm_category(llm)},
                     ).fetchone()
                     worker_ids.append((str(wrow[0]), str(qrow["id"]), str(qrow["question"]), llm, iter_idx))
 
@@ -927,14 +943,15 @@ def retry_failed_workers(
         for _, row in failed_df.iterrows():
             wrow = conn.execute(
                 text(
-                    "INSERT INTO run_workers (run_id, ai_question_id, llm, status, attempt) "
-                    "VALUES (:rid, :qid, :llm, 'pending', :attempt) RETURNING id"
+                    "INSERT INTO run_workers (run_id, ai_question_id, llm, llm_category, status, attempt) "
+                    "VALUES (:rid, :qid, :llm, :llm_category, 'pending', :attempt) RETURNING id"
                 ),
                 {
-                    "rid": run_id,
-                    "qid": str(row["ai_question_id"]),
-                    "llm": str(row["llm"]),
-                    "attempt": int(row["attempt"]) + 1,
+                    "rid":          run_id,
+                    "qid":          str(row["ai_question_id"]),
+                    "llm":          str(row["llm"]),
+                    "llm_category": _llm_category(str(row["llm"])),
+                    "attempt":      int(row["attempt"]) + 1,
                 },
             ).fetchone()
             new_workers.append(
