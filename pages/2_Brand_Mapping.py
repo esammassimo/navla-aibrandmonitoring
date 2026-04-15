@@ -94,16 +94,17 @@ def _apply_canonical(old_name: str, canonical_name: str) -> int:
     if not canonical_name or canonical_name.lower() == old_name.lower():
         return 0
     with get_engine().begin() as conn:
-        # Update historical brand_mentions
+        # Update historical brand_mentions via correlated subquery
         result = conn.execute(
             text(
-                "UPDATE brand_mentions bm "
+                "UPDATE brand_mentions "
                 "SET brand_name = :canonical "
-                "FROM ai_responses ar "
-                "JOIN runs r ON r.id = ar.run_id "
-                "WHERE bm.ai_response_id = ar.id "
-                "  AND r.project_id = :pid "
-                "  AND LOWER(bm.brand_name) = LOWER(:old_name)"
+                "WHERE LOWER(brand_name) = LOWER(:old_name) "
+                "  AND ai_response_id IN ("
+                "    SELECT ar.id FROM ai_responses ar "
+                "    JOIN runs r ON r.id = ar.run_id "
+                "    WHERE r.project_id = :pid"
+                "  )"
             ),
             {"canonical": canonical_name, "pid": project_id, "old_name": old_name},
         )
@@ -287,7 +288,12 @@ with tab_saved:
                                 st.rerun()
 
                 # Canonical name — inline expander per brand
-                canon_current = str(row.get("canonical_name") or "")
+                _raw_canon = row.get("canonical_name")
+                canon_current = "" if (
+                    _raw_canon is None or
+                    (isinstance(_raw_canon, float) and __import__("math").isnan(_raw_canon)) or
+                    str(_raw_canon).strip() in ("", "nan", "None")
+                ) else str(_raw_canon).strip()
                 with st.expander(
                     f"↳ Canonical name{': **' + canon_current + '**' if canon_current else ' (not set)'}",
                     expanded=False,
