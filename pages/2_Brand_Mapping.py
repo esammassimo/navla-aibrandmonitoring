@@ -214,7 +214,7 @@ with tab_saved:
             st.caption(f"Showing **{len(filtered_df)}** of **{all_count}** brands")
             st.markdown("---")
 
-            # #2 — Inline type buttons per brand row
+            # --- Type buttons (immediate save) ---
             for _, row in filtered_df.iterrows():
                 bname  = str(row["brand_name"])
                 btype  = str(row["brand_type"])
@@ -286,75 +286,88 @@ with tab_saved:
                                 st.cache_data.clear()
                                 st.rerun()
 
-                # Canonical name — st.form avoids session_state/widget key conflicts
-                _raw_canon = row.get("canonical_name")
-                import math as _math
-                canon_current = "" if (
-                    _raw_canon is None or
-                    (isinstance(_raw_canon, float) and _math.isnan(_raw_canon)) or
-                    str(_raw_canon).strip() in ("", "nan", "None")
-                ) else str(_raw_canon).strip()
+            st.markdown("---")
 
-                expander_label = (
-                    f"↳ Canonical name: **{canon_current}**"
-                    if canon_current else "↳ Canonical name (not set)"
-                )
-                with st.expander(expander_label, expanded=False):
-                    with st.form(key=f"canon_form_{bkey}", clear_on_submit=False):
-                        canon_input = st.text_input(
-                            "Map to canonical name",
-                            value=canon_current,
-                            placeholder="e.g. Locauto  (leave empty to clear)",
-                            label_visibility="collapsed",
-                        )
-                        col_apply, col_clear = st.columns([2, 1])
-                        with col_apply:
-                            apply_btn = st.form_submit_button(
-                                "Apply & normalize",
-                                type="primary",
-                                use_container_width=True,
-                            )
-                        with col_clear:
-                            clear_btn = st.form_submit_button(
-                                "Clear",
-                                use_container_width=True,
-                                disabled=not canon_current,
-                            )
-                    if apply_btn:
-                        val = canon_input.strip()
-                        if val == "":
-                            with get_engine().begin() as conn:
-                                conn.execute(
-                                    text("UPDATE project_brands SET canonical_name = NULL "
-                                         "WHERE project_id = :pid AND LOWER(brand_name) = LOWER(:name)"),
-                                    {"pid": project_id, "name": bname},
-                                )
-                            fetch_project_brands.clear()
-                            st.success("Canonical name cleared.")
-                            st.rerun()
-                        else:
-                            n = _apply_canonical(bname, val)
-                            fetch_project_brands.clear()
-                            if n > 0:
-                                st.success(f"✅ Remapped **{n}** mention(s): **{bname}** → **{val}**")
-                            else:
-                                st.info("Canonical name saved. No existing mentions to remap.")
-                            st.rerun()
-                    if clear_btn:
-                        with get_engine().begin() as conn:
-                            conn.execute(
-                                text("UPDATE project_brands SET canonical_name = NULL "
-                                     "WHERE project_id = :pid AND LOWER(brand_name) = LOWER(:name)"),
-                                {"pid": project_id, "name": bname},
-                            )
-                        fetch_project_brands.clear()
-                        st.rerun()
+            # --- Canonical name editor (single table + one button) ---
+            if is_admin:
+                import math as _math
+
+                def _clean_canon(v) -> str:
+                    return "" if (
+                        v is None or
+                        (isinstance(v, float) and _math.isnan(v)) or
+                        str(v).strip() in ("", "nan", "None")
+                    ) else str(v).strip()
+
+                canon_df = filtered_df[["brand_name", "canonical_name"]].copy()
+                canon_df["canonical_name"] = canon_df["canonical_name"].apply(_clean_canon)
+
+                with st.expander("✏️ Edit canonical names", expanded=False):
                     st.caption(
-                        "Remaps all historical `brand_mentions` from this name to the canonical. "
-                        "Future runs will also use this mapping via fuzzy matching."
+                        "Set a canonical name to remap all historical `brand_mentions` "
+                        "from that brand to the canonical. Leave empty to keep the brand name as-is."
+                    )
+                    edited_canon = st.data_editor(
+                        canon_df,
+                        column_config={
+                            "brand_name":    st.column_config.TextColumn("Brand", disabled=True),
+                            "canonical_name": st.column_config.TextColumn(
+                                "Canonical name",
+                                help="Leave empty to clear. Changes applied on 'Apply & normalize'.",
+                            ),
+                        },
+                        use_container_width=True,
+                        hide_index=True,
+                        num_rows="fixed",
+                        key=f"canon_editor_{project_id}_{selected_filter}_{search_a}",
                     )
 
-            st.markdown("---")
+                    if st.button("Apply & normalize all", type="primary",
+                                 key="canon_apply_all"):
+                        total_remapped = 0
+                        cleared = []
+                        remapped = []
+
+                        for _, erow in edited_canon.iterrows():
+                            bname_e = str(erow["brand_name"])
+                            new_val = _clean_canon(erow["canonical_name"])
+                            old_val = _clean_canon(
+                                filtered_df.loc[
+                                    filtered_df["brand_name"] == bname_e, "canonical_name"
+                                ].values[0]
+                                if not filtered_df[filtered_df["brand_name"] == bname_e].empty
+                                else ""
+                            )
+
+                            if new_val == old_val:
+                                continue  # no change
+
+                            if new_val == "":
+                                with get_engine().begin() as conn:
+                                    conn.execute(
+                                        text("UPDATE project_brands SET canonical_name = NULL "
+                                             "WHERE project_id = :pid AND LOWER(brand_name) = LOWER(:name)"),
+                                        {"pid": project_id, "name": bname_e},
+                                    )
+                                cleared.append(bname_e)
+                            else:
+                                n = _apply_canonical(bname_e, new_val)
+                                total_remapped += n
+                                remapped.append((bname_e, new_val, n))
+
+                        fetch_project_brands.clear()
+                        st.cache_data.clear()
+
+                        msgs = []
+                        if cleared:
+                            msgs.append(f"Cleared canonical for: {', '.join(cleared)}")
+                        for b, c, n in remapped:
+                            msgs.append(f"**{b}** → **{c}** ({n} mention(s) remapped)")
+                        if msgs:
+                            st.success("✅ " + "  \n".join(msgs))
+                        else:
+                            st.info("No changes detected.")
+                        st.rerun()
 
     # Add brand manually
     if is_admin:
