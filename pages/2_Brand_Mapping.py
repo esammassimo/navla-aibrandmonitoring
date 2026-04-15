@@ -328,27 +328,44 @@ with tab_saved:
                         total_remapped = 0
                         cleared = []
                         remapped = []
+                        debug_msgs = []
 
                         for _, erow in edited_canon.iterrows():
                             bname_e = str(erow["brand_name"])
                             new_val = _clean_canon(erow["canonical_name"])
+                            debug_msgs.append(f"brand='{bname_e}' new_val='{new_val}'")
 
-                            # Always save — _apply_canonical handles idempotency internally
                             if new_val == "":
                                 with get_engine().begin() as conn:
-                                    conn.execute(
+                                    r = conn.execute(
                                         text("UPDATE project_brands SET canonical_name = NULL "
                                              "WHERE project_id = :pid AND LOWER(brand_name) = LOWER(:name)"),
                                         {"pid": project_id, "name": bname_e},
                                     )
+                                debug_msgs.append(f"  → CLEAR rowcount={r.rowcount}")
                                 cleared.append(bname_e)
                             else:
+                                # Direct UPDATE — bypass _apply_canonical skip logic
+                                with get_engine().begin() as conn:
+                                    r = conn.execute(
+                                        text("UPDATE project_brands SET canonical_name = :canonical "
+                                             "WHERE project_id = :pid AND LOWER(brand_name) = LOWER(:name)"),
+                                        {"canonical": new_val, "pid": project_id, "name": bname_e},
+                                    )
+                                debug_msgs.append(f"  → SET canonical rowcount={r.rowcount}")
+                                # Also remap brand_mentions
                                 n = _apply_canonical(bname_e, new_val)
+                                debug_msgs.append(f"  → brand_mentions remapped={n}")
                                 total_remapped += n
                                 remapped.append((bname_e, new_val, n))
 
                         fetch_project_brands.clear()
                         st.cache_data.clear()
+
+                        # Show debug info
+                        with st.expander("Debug log", expanded=True):
+                            for m in debug_msgs:
+                                st.text(m)
 
                         msgs = []
                         if cleared:
