@@ -94,16 +94,17 @@ def _apply_canonical(old_name: str, canonical_name: str) -> int:
     if not canonical_name or canonical_name.lower() == old_name.lower():
         return 0
     with get_engine().begin() as conn:
-        # Update historical brand_mentions
+        # Update brand_mentions via subquery — avoids UPDATE...FROM...JOIN issues
         result = conn.execute(
             text(
-                "UPDATE brand_mentions bm "
+                "UPDATE brand_mentions "
                 "SET brand_name = :canonical "
-                "FROM ai_responses ar "
-                "JOIN runs r ON r.id = ar.run_id "
-                "WHERE bm.ai_response_id = ar.id "
-                "  AND r.project_id = :pid "
-                "  AND LOWER(bm.brand_name) = LOWER(:old_name)"
+                "WHERE LOWER(brand_name) = LOWER(:old_name) "
+                "  AND ai_response_id IN ("
+                "    SELECT ar.id FROM ai_responses ar "
+                "    JOIN runs r ON r.id = ar.run_id "
+                "    WHERE r.project_id = :pid"
+                "  )"
             ),
             {"canonical": canonical_name, "pid": project_id, "old_name": old_name},
         )
@@ -331,17 +332,8 @@ with tab_saved:
                         for _, erow in edited_canon.iterrows():
                             bname_e = str(erow["brand_name"])
                             new_val = _clean_canon(erow["canonical_name"])
-                            old_val = _clean_canon(
-                                filtered_df.loc[
-                                    filtered_df["brand_name"] == bname_e, "canonical_name"
-                                ].values[0]
-                                if not filtered_df[filtered_df["brand_name"] == bname_e].empty
-                                else ""
-                            )
 
-                            if new_val == old_val:
-                                continue  # no change
-
+                            # Always save — _apply_canonical handles idempotency internally
                             if new_val == "":
                                 with get_engine().begin() as conn:
                                     conn.execute(
