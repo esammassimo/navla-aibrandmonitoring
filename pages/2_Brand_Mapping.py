@@ -94,17 +94,16 @@ def _apply_canonical(old_name: str, canonical_name: str) -> int:
     if not canonical_name or canonical_name.lower() == old_name.lower():
         return 0
     with get_engine().begin() as conn:
-        # Update historical brand_mentions via correlated subquery
+        # Update historical brand_mentions
         result = conn.execute(
             text(
-                "UPDATE brand_mentions "
+                "UPDATE brand_mentions bm "
                 "SET brand_name = :canonical "
-                "WHERE LOWER(brand_name) = LOWER(:old_name) "
-                "  AND ai_response_id IN ("
-                "    SELECT ar.id FROM ai_responses ar "
-                "    JOIN runs r ON r.id = ar.run_id "
-                "    WHERE r.project_id = :pid"
-                "  )"
+                "FROM ai_responses ar "
+                "JOIN runs r ON r.id = ar.run_id "
+                "WHERE bm.ai_response_id = ar.id "
+                "  AND r.project_id = :pid "
+                "  AND LOWER(bm.brand_name) = LOWER(:old_name)"
             ),
             {"canonical": canonical_name, "pid": project_id, "old_name": old_name},
         )
@@ -289,30 +288,35 @@ with tab_saved:
 
                 # Canonical name — inline expander per brand
                 _raw_canon = row.get("canonical_name")
+                import math as _math
                 canon_current = "" if (
                     _raw_canon is None or
-                    (isinstance(_raw_canon, float) and __import__("math").isnan(_raw_canon)) or
+                    (isinstance(_raw_canon, float) and _math.isnan(_raw_canon)) or
                     str(_raw_canon).strip() in ("", "nan", "None")
                 ) else str(_raw_canon).strip()
-                with st.expander(
-                    f"↳ Canonical name{': **' + canon_current + '**' if canon_current else ' (not set)'}",
-                    expanded=False,
-                ):
-                    col_canon, col_canon_btn = st.columns([5, 2])
-                    with col_canon:
-                        canon_input = st.text_input(
-                            "Map to canonical name",
-                            value=canon_current,
-                            key=f"canon_input_{bkey}",
-                            placeholder="e.g. Locauto  (leave empty to clear)",
-                            label_visibility="collapsed",
-                        )
-                    with col_canon_btn:
+
+                # Always sync session_state with the current DB value so the
+                # input field reflects what is saved after each rerun
+                ss_key = f"canon_val_{bkey}"
+                st.session_state[ss_key] = canon_current
+
+                expander_label = (
+                    f"↳ Canonical name: **{canon_current}**"
+                    if canon_current else "↳ Canonical name (not set)"
+                )
+                with st.expander(expander_label, expanded=False):
+                    canon_input = st.text_input(
+                        "Map to canonical name",
+                        key=ss_key,
+                        placeholder="e.g. Locauto  (leave empty to clear)",
+                        label_visibility="collapsed",
+                    )
+                    col_apply, col_clear = st.columns([2, 1])
+                    with col_apply:
                         if st.button("Apply & normalize", key=f"canon_btn_{bkey}",
                                      use_container_width=True, type="primary"):
-                            canon_stripped = canon_input.strip()
-                            if canon_stripped == "":
-                                # Clear canonical
+                            val = canon_input.strip()
+                            if val == "":
                                 with get_engine().begin() as conn:
                                     conn.execute(
                                         text("UPDATE project_brands SET canonical_name = NULL "
@@ -323,18 +327,27 @@ with tab_saved:
                                 st.success("Canonical name cleared.")
                                 st.rerun()
                             else:
-                                n = _apply_canonical(bname, canon_stripped)
+                                n = _apply_canonical(bname, val)
+                                fetch_project_brands.clear()
                                 if n > 0:
-                                    st.success(
-                                        f"✅ Remapped **{n}** mention(s) from "
-                                        f"**{bname}** → **{canon_stripped}**"
-                                    )
+                                    st.success(f"✅ Remapped **{n}** mention(s): **{bname}** → **{val}**")
                                 else:
                                     st.info("Canonical name saved. No existing mentions to remap.")
                                 st.rerun()
+                    with col_clear:
+                        if canon_current and st.button("Clear", key=f"canon_clear_{bkey}",
+                                                        use_container_width=True):
+                            with get_engine().begin() as conn:
+                                conn.execute(
+                                    text("UPDATE project_brands SET canonical_name = NULL "
+                                         "WHERE project_id = :pid AND LOWER(brand_name) = LOWER(:name)"),
+                                    {"pid": project_id, "name": bname},
+                                )
+                            fetch_project_brands.clear()
+                            st.rerun()
                     st.caption(
-                        "Setting a canonical name remaps all historical `brand_mentions` for this project "
-                        "from the current name to the canonical. Future runs will also use this mapping."
+                        "Remaps all historical `brand_mentions` from this name to the canonical. "
+                        "Future runs will also use this mapping via fuzzy matching."
                     )
 
             st.markdown("---")

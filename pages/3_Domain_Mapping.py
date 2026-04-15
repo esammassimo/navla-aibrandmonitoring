@@ -260,22 +260,33 @@ with tab_saved:
                                 st.session_state.pop(del_key, None)
                                 st.rerun()
 
-                # Canonical expander
+                # Canonical expander — session_state to persist value across reruns
+                import math as _math
+                _raw_dcanon = row.get("canonical_domain")
+                dcanon = "" if (
+                    _raw_dcanon is None or
+                    (isinstance(_raw_dcanon, float) and _math.isnan(_raw_dcanon)) or
+                    str(_raw_dcanon).strip() in ("", "nan", "None")
+                ) else str(_raw_dcanon).strip()
+
+                dss_key = f"dcanon_val_{dkey}"
+                if dss_key not in st.session_state:
+                    st.session_state[dss_key] = dcanon
+
                 canon_label = f"↳ Canonical: **{dcanon}**" if dcanon else "↳ Canonical (not set)"
                 with st.expander(canon_label, expanded=False):
-                    cc1, cc2 = st.columns([5, 2])
+                    canon_in = st.text_input(
+                        "Map to canonical",
+                        key=dss_key,
+                        placeholder="e.g. example.com",
+                        label_visibility="collapsed",
+                    )
+                    cc1, cc2 = st.columns([2, 1])
                     with cc1:
-                        canon_in = st.text_input(
-                            "Map to canonical",
-                            value=dcanon,
-                            key=f"dcanon_{dkey}",
-                            placeholder="e.g. example.com",
-                            label_visibility="collapsed",
-                        )
-                    with cc2:
                         if st.button("Apply", key=f"dcanon_btn_{dkey}",
                                      type="primary", use_container_width=True):
-                            if canon_in.strip() == "":
+                            val = st.session_state.get(dss_key, "").strip()
+                            if val == "":
                                 with get_engine().begin() as conn:
                                     conn.execute(
                                         text("UPDATE project_domains SET canonical_domain = NULL "
@@ -283,15 +294,29 @@ with tab_saved:
                                         {"pid": project_id, "d": dname},
                                     )
                                 st.cache_data.clear()
+                                st.session_state.pop(dss_key, None)
                                 st.success("Canonical cleared.")
                                 st.rerun()
                             else:
-                                n = _apply_domain_canonical(dname, canon_in.strip())
+                                n = _apply_domain_canonical(dname, val)
+                                st.session_state.pop(dss_key, None)
                                 st.success(
                                     f"✅ Canonical set. **{n}** mention(s) use this domain."
                                     if n > 0 else "✅ Canonical saved."
                                 )
                                 st.rerun()
+                    with cc2:
+                        if dcanon and st.button("Clear", key=f"dcanon_clear_{dkey}",
+                                                 use_container_width=True):
+                            with get_engine().begin() as conn:
+                                conn.execute(
+                                    text("UPDATE project_domains SET canonical_domain = NULL "
+                                         "WHERE project_id = :pid AND LOWER(domain) = LOWER(:d)"),
+                                    {"pid": project_id, "d": dname},
+                                )
+                            st.cache_data.clear()
+                            st.session_state.pop(dss_key, None)
+                            st.rerun()
                     st.caption(
                         "The canonical domain is used by the view JOIN — "
                         "all source_mentions with this domain will appear under the canonical name."
@@ -343,15 +368,21 @@ with tab_sugg:
                 f"**{len(sugg_df)}** domain(s) found in AI responses not yet classified."
             )
 
-            search_b = st.text_input(
-                "Search suggested domains",
-                key=f"search_sd_{project_id}",
-                placeholder="Filter by name…",
-            )
-
-            sugg_df["_add"]        = False
-            sugg_df["domain_type"] = "—"
-            sugg_df["merge_into"]  = "— Add as new domain —"
+            # Search + Select all / Deselect all controls
+            col_search, col_selall, col_deselall = st.columns([4, 1, 1])
+            with col_search:
+                search_b = st.text_input(
+                    "Search suggested domains",
+                    key=f"search_sd_{project_id}",
+                    placeholder="Filter by name…",
+                    label_visibility="collapsed",
+                )
+            with col_selall:
+                select_all = st.button("✅ Select all", key="sugg_select_all",
+                                       use_container_width=True)
+            with col_deselall:
+                deselect_all = st.button("☐ Deselect all", key="sugg_deselect_all",
+                                         use_container_width=True)
 
             saved_names = sorted(domains_df["domain"].tolist()) if not domains_df.empty else []
             merge_opts  = ["— Add as new domain —"] + saved_names
@@ -360,6 +391,25 @@ with tab_sugg:
                 sugg_df[sugg_df["domain"].str.contains(search_b.strip(), case=False, na=False)]
                 if search_b.strip() else sugg_df
             ).reset_index(drop=True)
+
+            # Handle Select all / Deselect all via session_state
+            sugg_editor_key = f"domain_editor_sugg_{project_id}_{search_b}"
+            if select_all:
+                st.session_state[sugg_editor_key] = {
+                    "edited_rows": {i: {"_add": True} for i in range(len(display_b))},
+                    "added_rows": [], "deleted_rows": [],
+                }
+                st.rerun()
+            if deselect_all:
+                st.session_state[sugg_editor_key] = {
+                    "edited_rows": {i: {"_add": False} for i in range(len(display_b))},
+                    "added_rows": [], "deleted_rows": [],
+                }
+                st.rerun()
+
+            display_b["_add"]        = False
+            display_b["domain_type"] = "—"
+            display_b["merge_into"]  = "— Add as new domain —"
 
             edited_b = st.data_editor(
                 display_b[["_add", "domain", "domain_type", "merge_into"]],
@@ -383,45 +433,60 @@ with tab_sugg:
                 num_rows="fixed",
                 use_container_width=True,
                 hide_index=True,
-                key=f"domain_editor_sugg_{project_id}_{search_b}",
+                key=sugg_editor_key,
             )
+
+            # Bulk type assignment + counter row
+            n_sel = int(edited_b["_add"].sum())
+            col_bulk, col_counter = st.columns([3, 2])
+            with col_bulk:
+                bulk_type = st.selectbox(
+                    "Assign type to all selected",
+                    options=["(keep individual)"] + _DOMAIN_TYPE_OPTIONS,
+                    key="bulk_type_sugg",
+                    label_visibility="collapsed",
+                    help="Override the Type column for all selected rows at once.",
+                )
+            with col_counter:
+                st.caption(f"**{n_sel}** of {len(display_b)} selected")
 
             st.caption(
                 "**Merge into existing domain**: consolidates variants like "
                 "*www.example.com* → *example.com* by updating the canonical mapping."
             )
 
-            if st.button("Apply selected", type="primary", key="apply_suggested_domains"):
+            if st.button("Apply selected", type="primary", key="apply_suggested_domains",
+                         disabled=n_sel == 0):
                 to_proc = edited_b[edited_b["_add"] == True]  # noqa: E712
-                if to_proc.empty:
-                    st.warning("No domains selected. Check the 'Select?' column.")
-                else:
-                    exist_lower = set(domains_df["domain"].str.lower()) if not domains_df.empty else set()
-                    new_rows = []
-                    merged   = []
+                exist_lower = set(domains_df["domain"].str.lower()) if not domains_df.empty else set()
+                new_rows = []
+                merged   = []
 
-                    for _, r in to_proc.iterrows():
-                        detected = str(r["domain"])
-                        merge_tgt = str(r["merge_into"])
-                        dtype     = str(r["domain_type"])
+                for _, r in to_proc.iterrows():
+                    detected  = str(r["domain"])
+                    merge_tgt = str(r["merge_into"])
+                    dtype = (
+                        bulk_type if bulk_type != "(keep individual)"
+                        else str(r["domain_type"])
+                    )
 
-                        if merge_tgt != "— Add as new domain —":
-                            n = _apply_domain_canonical(detected, merge_tgt)
-                            merged.append((detected, merge_tgt, n))
-                        elif detected.lower() not in exist_lower:
-                            new_rows.append({
-                                "domain":          detected,
-                                "domain_type":     dtype,
-                                "canonical_domain": None,
-                            })
+                    if merge_tgt != "— Add as new domain —":
+                        n = _apply_domain_canonical(detected, merge_tgt)
+                        merged.append((detected, merge_tgt, n))
+                    elif detected.lower() not in exist_lower:
+                        new_rows.append({
+                            "domain":          detected,
+                            "domain_type":     dtype,
+                            "canonical_domain": None,
+                        })
 
-                    if new_rows:
-                        _insert_domains(new_rows)
+                if new_rows:
+                    _insert_domains(new_rows)
 
-                    msgs = []
-                    if new_rows:
-                        msgs.append(f"**{len(new_rows)}** domain(s) added to Saved Domains.")
-                    for det, tgt, n in merged:
-                        msgs.append(f"**{det}** → **{tgt}**: {n} mention(s) use this domain.")
-                    st.success("✅ " + "  \n".join(msgs))
-                    st.rerun()
+                msgs = []
+                if new_rows:
+                    msgs.append(f"**{len(new_rows)}** domain(s) added to Saved Domains.")
+                for det, tgt, n in merged:
+                    msgs.append(f"**{det}** → **{tgt}**: {n} mention(s) use this domain.")
+                st.success("✅ " + "  \n".join(msgs))
+                st.rerun()
