@@ -286,7 +286,7 @@ with tab_saved:
                                 st.cache_data.clear()
                                 st.rerun()
 
-                # Canonical name — inline expander per brand
+                # Canonical name — st.form avoids session_state/widget key conflicts
                 _raw_canon = row.get("canonical_name")
                 import math as _math
                 canon_current = "" if (
@@ -295,48 +295,34 @@ with tab_saved:
                     str(_raw_canon).strip() in ("", "nan", "None")
                 ) else str(_raw_canon).strip()
 
-                # Always sync session_state with the current DB value so the
-                # input field reflects what is saved after each rerun
-                ss_key = f"canon_val_{bkey}"
-                st.session_state[ss_key] = canon_current
-
                 expander_label = (
                     f"↳ Canonical name: **{canon_current}**"
                     if canon_current else "↳ Canonical name (not set)"
                 )
                 with st.expander(expander_label, expanded=False):
-                    canon_input = st.text_input(
-                        "Map to canonical name",
-                        key=ss_key,
-                        placeholder="e.g. Locauto  (leave empty to clear)",
-                        label_visibility="collapsed",
-                    )
-                    col_apply, col_clear = st.columns([2, 1])
-                    with col_apply:
-                        if st.button("Apply & normalize", key=f"canon_btn_{bkey}",
-                                     use_container_width=True, type="primary"):
-                            val = canon_input.strip()
-                            if val == "":
-                                with get_engine().begin() as conn:
-                                    conn.execute(
-                                        text("UPDATE project_brands SET canonical_name = NULL "
-                                             "WHERE project_id = :pid AND LOWER(brand_name) = LOWER(:name)"),
-                                        {"pid": project_id, "name": bname},
-                                    )
-                                fetch_project_brands.clear()
-                                st.success("Canonical name cleared.")
-                                st.rerun()
-                            else:
-                                n = _apply_canonical(bname, val)
-                                fetch_project_brands.clear()
-                                if n > 0:
-                                    st.success(f"✅ Remapped **{n}** mention(s): **{bname}** → **{val}**")
-                                else:
-                                    st.info("Canonical name saved. No existing mentions to remap.")
-                                st.rerun()
-                    with col_clear:
-                        if canon_current and st.button("Clear", key=f"canon_clear_{bkey}",
-                                                        use_container_width=True):
+                    with st.form(key=f"canon_form_{bkey}", clear_on_submit=False):
+                        canon_input = st.text_input(
+                            "Map to canonical name",
+                            value=canon_current,
+                            placeholder="e.g. Locauto  (leave empty to clear)",
+                            label_visibility="collapsed",
+                        )
+                        col_apply, col_clear = st.columns([2, 1])
+                        with col_apply:
+                            apply_btn = st.form_submit_button(
+                                "Apply & normalize",
+                                type="primary",
+                                use_container_width=True,
+                            )
+                        with col_clear:
+                            clear_btn = st.form_submit_button(
+                                "Clear",
+                                use_container_width=True,
+                                disabled=not canon_current,
+                            )
+                    if apply_btn:
+                        val = canon_input.strip()
+                        if val == "":
                             with get_engine().begin() as conn:
                                 conn.execute(
                                     text("UPDATE project_brands SET canonical_name = NULL "
@@ -344,7 +330,25 @@ with tab_saved:
                                     {"pid": project_id, "name": bname},
                                 )
                             fetch_project_brands.clear()
+                            st.success("Canonical name cleared.")
                             st.rerun()
+                        else:
+                            n = _apply_canonical(bname, val)
+                            fetch_project_brands.clear()
+                            if n > 0:
+                                st.success(f"✅ Remapped **{n}** mention(s): **{bname}** → **{val}**")
+                            else:
+                                st.info("Canonical name saved. No existing mentions to remap.")
+                            st.rerun()
+                    if clear_btn:
+                        with get_engine().begin() as conn:
+                            conn.execute(
+                                text("UPDATE project_brands SET canonical_name = NULL "
+                                     "WHERE project_id = :pid AND LOWER(brand_name) = LOWER(:name)"),
+                                {"pid": project_id, "name": bname},
+                            )
+                        fetch_project_brands.clear()
+                        st.rerun()
                     st.caption(
                         "Remaps all historical `brand_mentions` from this name to the canonical. "
                         "Future runs will also use this mapping via fuzzy matching."
