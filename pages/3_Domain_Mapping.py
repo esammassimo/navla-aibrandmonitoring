@@ -392,22 +392,19 @@ with tab_sugg:
                 if search_b.strip() else sugg_df
             ).reset_index(drop=True)
 
-            # Handle Select all / Deselect all via session_state
-            sugg_editor_key = f"domain_editor_sugg_{project_id}_{search_b}"
+            # Use a separate session_state key for select-all state
+            # Never write to the data_editor widget key directly
+            sel_state_key = f"domain_sugg_sel_{project_id}_{search_b}"
             if select_all:
-                st.session_state[sugg_editor_key] = {
-                    "edited_rows": {i: {"_add": True} for i in range(len(display_b))},
-                    "added_rows": [], "deleted_rows": [],
-                }
+                st.session_state[sel_state_key] = True
                 st.rerun()
             if deselect_all:
-                st.session_state[sugg_editor_key] = {
-                    "edited_rows": {i: {"_add": False} for i in range(len(display_b))},
-                    "added_rows": [], "deleted_rows": [],
-                }
+                st.session_state[sel_state_key] = False
                 st.rerun()
 
-            display_b["_add"]        = False
+            # Build display_b with _add pre-set based on select-all state
+            all_selected = st.session_state.get(sel_state_key, None)
+            display_b["_add"]        = True if all_selected is True else False
             display_b["domain_type"] = "—"
             display_b["merge_into"]  = "— Add as new domain —"
 
@@ -433,7 +430,7 @@ with tab_sugg:
                 num_rows="fixed",
                 use_container_width=True,
                 hide_index=True,
-                key=sugg_editor_key,
+                key=f"domain_editor_sugg_{project_id}_{search_b}",
             )
 
             # Bulk type assignment + counter row
