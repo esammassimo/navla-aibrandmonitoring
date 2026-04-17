@@ -1069,11 +1069,17 @@ def retry_failed_workers(
         )
 
     # Execute
+    retry_log = _get_run_logger(run_id)
+    retry_log.info("=" * 60)
+    retry_log.info("RETRY STARTED — %d failed worker(s)", len(new_workers))
+    retry_log.info("=" * 60)
+
     completed = 0
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
             executor.submit(
-                _worker, run_id, wid, qid, question, llm, country, language, delay, project_brands_list
+                _worker, run_id, wid, qid, question, llm,
+                country, language, delay, project_brands_list, "both", retry_log
             ): wid
             for wid, qid, question, llm in new_workers
         }

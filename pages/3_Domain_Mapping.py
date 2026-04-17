@@ -260,7 +260,7 @@ with tab_saved:
                                 st.session_state.pop(del_key, None)
                                 st.rerun()
 
-                # Canonical expander — session_state to persist value across reruns
+                # Canonical expander — st.form avoids session_state/widget key conflict
                 import math as _math
                 _raw_dcanon = row.get("canonical_domain")
                 dcanon = "" if (
@@ -269,45 +269,26 @@ with tab_saved:
                     str(_raw_dcanon).strip() in ("", "nan", "None")
                 ) else str(_raw_dcanon).strip()
 
-                dss_key = f"dcanon_val_{dkey}"
-                if dss_key not in st.session_state:
-                    st.session_state[dss_key] = dcanon
-
                 canon_label = f"↳ Canonical: **{dcanon}**" if dcanon else "↳ Canonical (not set)"
                 with st.expander(canon_label, expanded=False):
-                    canon_in = st.text_input(
-                        "Map to canonical",
-                        key=dss_key,
-                        placeholder="e.g. example.com",
-                        label_visibility="collapsed",
-                    )
-                    cc1, cc2 = st.columns([2, 1])
-                    with cc1:
-                        if st.button("Apply", key=f"dcanon_btn_{dkey}",
-                                     type="primary", use_container_width=True):
-                            val = st.session_state.get(dss_key, "").strip()
-                            if val == "":
-                                with get_engine().begin() as conn:
-                                    conn.execute(
-                                        text("UPDATE project_domains SET canonical_domain = NULL "
-                                             "WHERE project_id = :pid AND LOWER(domain) = LOWER(:d)"),
-                                        {"pid": project_id, "d": dname},
-                                    )
-                                st.cache_data.clear()
-                                st.session_state.pop(dss_key, None)
-                                st.success("Canonical cleared.")
-                                st.rerun()
-                            else:
-                                n = _apply_domain_canonical(dname, val)
-                                st.session_state.pop(dss_key, None)
-                                st.success(
-                                    f"✅ Canonical set. **{n}** mention(s) use this domain."
-                                    if n > 0 else "✅ Canonical saved."
-                                )
-                                st.rerun()
-                    with cc2:
-                        if dcanon and st.button("Clear", key=f"dcanon_clear_{dkey}",
-                                                 use_container_width=True):
+                    with st.form(key=f"dcanon_form_{dkey}", clear_on_submit=False):
+                        col_inp, col_btn, col_clr = st.columns([5, 2, 1])
+                        with col_inp:
+                            canon_in = st.text_input(
+                                "Map to canonical",
+                                value=dcanon,
+                                placeholder="e.g. example.com",
+                                label_visibility="collapsed",
+                            )
+                        with col_btn:
+                            apply_d = st.form_submit_button("Apply", type="primary",
+                                                            use_container_width=True)
+                        with col_clr:
+                            clear_d = st.form_submit_button("✕", use_container_width=True,
+                                                            disabled=not dcanon)
+                    if apply_d:
+                        val = canon_in.strip()
+                        if val == "":
                             with get_engine().begin() as conn:
                                 conn.execute(
                                     text("UPDATE project_domains SET canonical_domain = NULL "
@@ -315,8 +296,31 @@ with tab_saved:
                                     {"pid": project_id, "d": dname},
                                 )
                             st.cache_data.clear()
-                            st.session_state.pop(dss_key, None)
+                            st.success("Canonical cleared.")
                             st.rerun()
+                        else:
+                            with get_engine().begin() as conn:
+                                conn.execute(
+                                    text("UPDATE project_domains SET canonical_domain = :canon "
+                                         "WHERE project_id = :pid AND LOWER(domain) = LOWER(:d)"),
+                                    {"canon": val, "pid": project_id, "d": dname},
+                                )
+                            n = _apply_domain_canonical(dname, val)
+                            st.cache_data.clear()
+                            st.success(
+                                f"✅ Canonical set. **{n}** mention(s) use this domain."
+                                if n > 0 else "✅ Canonical saved."
+                            )
+                            st.rerun()
+                    if clear_d:
+                        with get_engine().begin() as conn:
+                            conn.execute(
+                                text("UPDATE project_domains SET canonical_domain = NULL "
+                                     "WHERE project_id = :pid AND LOWER(domain) = LOWER(:d)"),
+                                {"pid": project_id, "d": dname},
+                            )
+                        st.cache_data.clear()
+                        st.rerun()
                     st.caption(
                         "The canonical domain is used by the view JOIN — "
                         "all source_mentions with this domain will appear under the canonical name."

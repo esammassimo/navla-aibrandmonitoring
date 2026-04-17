@@ -285,14 +285,12 @@ else:
                 "LLM",
                 options=LLM_GROUP["LLM"],
                 default=LLM_GROUP["LLM"],
-                key="run_sel_llm",
             )
         with col_ai_f:
             sel_llms_ai = st.multiselect(
                 "AI Features",
                 options=LLM_GROUP["AI Features"],
                 default=LLM_GROUP["AI Features"],
-                key="run_sel_ai",
             )
         selected_llms = sel_llms_llm + sel_llms_ai
 
@@ -340,6 +338,7 @@ else:
                     triggered_by="manual",
                     progress_callback=_progress_cb,
                     iterations=int(iterations),
+                    collect="both",
                 )
                 progress_bar.progress(1.0, text="Run completato.")
                 status_text.empty()
@@ -654,14 +653,12 @@ with st.form("form_schedule"):
             "LLM",
             options=LLM_GROUP["LLM"],
             default=LLM_GROUP["LLM"],
-            key="sched_sel_llm",
         )
     with col_sched_b:
         sched_llms_ai = st.multiselect(
             "AI Features",
             options=LLM_GROUP["AI Features"],
             default=LLM_GROUP["AI Features"],
-            key="sched_sel_ai",
         )
     sched_llms = sched_llms_llm + sched_llms_ai
 
