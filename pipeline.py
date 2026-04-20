@@ -88,8 +88,17 @@ Normalization rules:
 and canonical form.
 
 Assign position as the ordinal of first mention (1 = first brand mentioned).
-If no brands are found, return empty.
-Respond ONLY in TOML format, no other text.
+If no brands are found, return an empty list.
+Respond ONLY in TOML format, no markdown, no extra text.
+
+Required TOML format:
+[[brands]]
+name = "Brand Name"
+position = 1
+
+[[brands]]
+name = "Another Brand"
+position = 2
 
 Text:
 {response_text}
@@ -215,7 +224,10 @@ def _call_chatgpt(question: str, country: str) -> tuple[str, list[str], str]:
                     for ann in content.get("annotations", []):
                         if ann.get("type") == "url_citation" and ann.get("url"):
                             sources.append(ann["url"])
-            return "\n".join(texts).strip(), sources, model
+            result_text = "\n".join(texts).strip()
+            if result_text:  # only return if we got actual content
+                return result_text, sources, model
+            logger.warning("ChatGPT Responses API returned 200 but empty text — falling back")
     except Exception as exc:
         logger.warning("ChatGPT Responses API error: %s", exc)
 
@@ -750,10 +762,14 @@ def _worker(
     project_brands: list[dict] | None = None,
     collect: str = "both",
     run_logger: logging.Logger | None = None,
+    keyword: str = "",
 ) -> None:
     """Execute one (question × LLM) unit of work."""
     rl = run_logger or logger
     q_short = question[:80]
+    # AIO and AI Mode use the keyword as query; conversational LLMs use the full question
+    _aio_llms = {"aio", "aim"}
+    query_text = keyword.strip() if keyword.strip() and _llm_key(llm) in _aio_llms else question
 
     try:
         _db_update_worker_running(worker_id)
@@ -770,9 +786,9 @@ def _worker(
         elif llm_key == "perplexity":
             response_text, sources, model_name = _call_perplexity(question)
         elif llm_key == "aio":
-            response_text, sources, model_name = _call_aio(question, country, language)
+            response_text, sources, model_name = _call_aio(query_text, country, language)
         elif llm_key == "aim":
-            response_text, sources, model_name = _call_aim(question, country, language)
+            response_text, sources, model_name = _call_aim(query_text, country, language)
         else:
             response_text, sources, model_name = f"ERROR: unknown LLM '{llm}'", [], ""
 
@@ -849,10 +865,12 @@ def start_run(
     max_workers: int = int(secrets.get("pipeline", {}).get("max_workers", 4))
     delay: float = float(secrets.get("pipeline", {}).get("request_delay_seconds", 1))
 
-    # --- Load active questions ---
+    # --- Load active questions (with keyword text for AIO/AIM) ---
     questions_df = run_query(
-        "SELECT id, question FROM ai_questions "
-        "WHERE project_id = %(pid)s AND status = 'active'",
+        "SELECT aq.id, aq.question, COALESCE(k.keyword, '') AS keyword "
+        "FROM ai_questions aq "
+        "LEFT JOIN keywords k ON k.id = aq.keyword_id "
+        "WHERE aq.project_id = %(pid)s AND aq.status = 'active'",
         {"pid": project_id},
     )
     if questions_df.empty:
@@ -932,7 +950,7 @@ def start_run(
                         {"rid": run_id, "qid": str(qrow["id"]), "llm": llm,
                          "llm_category": _llm_category(llm)},
                     ).fetchone()
-                    worker_ids.append((str(wrow[0]), str(qrow["id"]), str(qrow["question"]), llm, iter_idx))
+                    worker_ids.append((str(wrow[0]), str(qrow["id"]), str(qrow["question"]), llm, iter_idx, str(qrow.get("keyword", ""))))
 
     # --- Execute workers ---
     # Strategy: questions are parallelised via ThreadPoolExecutor.
@@ -944,45 +962,48 @@ def start_run(
     # Determine number of iteration rounds (max across iterable LLMs selected)
     n_rounds = max((_effective_iterations(llm) for llm in llms), default=1)
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        for iter_idx in range(n_rounds):
-            # Pick workers belonging to this iteration round
-            round_workers = [
-                (wid, qid, q, llm)
-                for wid, qid, q, llm, idx in worker_ids
-                if idx == iter_idx
-            ]
-            if not round_workers:
-                continue
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            for iter_idx in range(n_rounds):
+                # Pick workers belonging to this iteration round
+                round_workers = [
+                    (wid, qid, q, llm, idx, kw)
+                    for wid, qid, q, llm, idx, kw in worker_ids
+                    if idx == iter_idx
+                ]
+                if not round_workers:
+                    continue
 
-            futures = {}
-            for worker_id, ai_question_id, question, llm in round_workers:
-                fut = executor.submit(
-                    _worker,
-                    run_id, worker_id, ai_question_id, question,
-                    llm, country, language, delay, project_brands_list, collect, run_log,
-                )
-                futures[fut] = worker_id
+                futures = {}
+                for worker_id, ai_question_id, question, llm, *_rest in round_workers:
+                    kw = _rest[1] if len(_rest) > 1 else ""
+                    fut = executor.submit(
+                        _worker,
+                        run_id, worker_id, ai_question_id, question,
+                        llm, country, language, delay, project_brands_list, collect, run_log, kw,
+                    )
+                    futures[fut] = worker_id
 
-            for fut in as_completed(futures):
-                completed += 1
-                if progress_callback:
-                    try:
-                        progress_callback(completed, total)
-                    except Exception:
-                        pass
-                exc = fut.exception()
-                if exc:
-                    logger.error("Unhandled future exception: %s", exc)
+                for fut in as_completed(futures):
+                    completed += 1
+                    if progress_callback:
+                        try:
+                            progress_callback(completed, total)
+                        except Exception:
+                            pass
+                    exc = fut.exception()
+                    if exc:
+                        logger.error("Unhandled future exception: %s", exc)
+    finally:
+        # Always finalise the run — even if Streamlit session drops or an
+        # unexpected exception propagates out of the executor block.
+        _db_finalize_run(run_id)
+        run_log.info("=" * 70)
+        run_log.info("RUN FINISHED  id=%s  status=see DB", run_id)
+        run_log.info("=" * 70)
+        for h in run_log.handlers:
+            h.flush()
 
-    # --- Finalise run ---
-    _db_finalize_run(run_id)
-    run_log.info("=" * 70)
-    run_log.info("RUN FINISHED  id=%s  status=see DB", run_id)
-    run_log.info("=" * 70)
-    # Close file handler to flush
-    for h in run_log.handlers:
-        h.flush()
     return run_id
 
 
@@ -1000,11 +1021,13 @@ def retry_failed_workers(
     max_workers: int = int(secrets.get("pipeline", {}).get("max_workers", 4))
     delay: float = float(secrets.get("pipeline", {}).get("request_delay_seconds", 1))
 
-    # Load failed workers
+    # Load failed workers (with keyword for AIO/AIM)
     failed_df = run_query(
-        "SELECT rw.id, rw.ai_question_id, aq.question, rw.llm, rw.attempt "
+        "SELECT rw.id, rw.ai_question_id, aq.question, rw.llm, rw.attempt, "
+        "       COALESCE(k.keyword, '') AS keyword "
         "FROM run_workers rw "
         "JOIN ai_questions aq ON aq.id = rw.ai_question_id "
+        "LEFT JOIN keywords k ON k.id = aq.keyword_id "
         "WHERE rw.run_id = %(rid)s AND rw.status = 'failed'",
         {"rid": run_id},
     )
@@ -1058,7 +1081,8 @@ def retry_failed_workers(
                 },
             ).fetchone()
             new_workers.append(
-                (str(wrow[0]), str(row["ai_question_id"]), str(row["question"]), str(row["llm"]))
+                (str(wrow[0]), str(row["ai_question_id"]), str(row["question"]),
+                 str(row["llm"]), str(row.get("keyword", "")))
             )
 
     # Set run back to running
@@ -1079,9 +1103,9 @@ def retry_failed_workers(
         futures = {
             executor.submit(
                 _worker, run_id, wid, qid, question, llm,
-                country, language, delay, project_brands_list, "both", retry_log
+                country, language, delay, project_brands_list, "both", retry_log, kw
             ): wid
-            for wid, qid, question, llm in new_workers
+            for wid, qid, question, llm, kw in new_workers
         }
         for fut in as_completed(futures):
             completed += 1
