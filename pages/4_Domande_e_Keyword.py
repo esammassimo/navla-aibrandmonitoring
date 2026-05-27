@@ -341,7 +341,13 @@ if is_admin:
                 proj_lang = proj_row.iloc[0]["language"] if proj_row is not None and not proj_row.empty else "it"
 
                 try:
-                    api_keys = dict(st.secrets.get("api_keys", {}))
+                    api_keys = {
+                        "anthropic":  st.secrets["api_keys"]["anthropic"],
+                        "openai":     st.secrets["api_keys"].get("openai", ""),
+                        "google":     st.secrets["api_keys"].get("google", ""),
+                        "perplexity": st.secrets["api_keys"].get("perplexity", ""),
+                        "serpapi":    st.secrets["api_keys"].get("serpapi", ""),
+                    }
                 except Exception:
                     api_keys = {}
 
