@@ -5,6 +5,9 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from typing import Optional
 
+import math
+
+import pandas as pd
 import streamlit as st
 from sqlalchemy import text
 
@@ -20,6 +23,7 @@ from utils import (
     get_engine,
     render_sidebar,
     require_login,
+    run_query,
     set_schedule_active,
     upsert_project_schedule,
 )
@@ -736,3 +740,293 @@ if "export_xlsx_bytes" in st.session_state:
         key="dl_export_xlsx",
     )
 
+
+# ===========================================================================
+# SECTION — Import historical data
+# ===========================================================================
+st.divider()
+st.subheader("Import historical data")
+st.caption(
+    "Import brand mentions, source mentions and responses from a Compass-format Excel file. "
+    "The project must already have the AI Questions configured. "
+    "One run is created per unique date in the file."
+)
+
+if not is_admin:
+    st.info("This section is only available to administrators.")
+else:
+    uploaded_hist = st.file_uploader(
+        "Upload Excel file (.xlsx)",
+        type=["xlsx"],
+        key="hist_import_upload",
+    )
+
+    if uploaded_hist:
+        # ---------------------------------------------------------------
+        # Preview
+        # ---------------------------------------------------------------
+        from openpyxl import load_workbook as _load_wb
+
+        uploaded_hist.seek(0)
+        wb_prev = _load_wb(uploaded_hist, read_only=True, data_only=True)
+        uploaded_hist.seek(0)
+
+        required_sheets = [
+            "Risposte - Apps Script",
+            "Brand - Apps Script",
+            "Fonti - Apps Script",
+        ]
+        missing = [s for s in required_sheets if s not in wb_prev.sheetnames]
+        if missing:
+            st.error(f"Missing sheets in file: {', '.join(missing)}")
+        else:
+            def _load_sheet(wb, name):
+                ws = wb[name]
+                rows = [r for r in ws.iter_rows(values_only=True)
+                        if any(c is not None for c in r)]
+                if len(rows) < 2:
+                    return pd.DataFrame()
+                return pd.DataFrame(rows[1:], columns=rows[0])
+
+            df_resp   = _load_sheet(wb_prev, "Risposte - Apps Script")
+            df_brand  = _load_sheet(wb_prev, "Brand - Apps Script")
+            df_source = _load_sheet(wb_prev, "Fonti - Apps Script")
+
+            # Parse dates
+            for df in [df_resp, df_brand, df_source]:
+                if not df.empty and "Data" in df.columns:
+                    df["_date"] = pd.to_datetime(df["Data"], errors="coerce").dt.date
+
+            unique_dates = sorted(df_resp["_date"].dropna().unique()) if not df_resp.empty else []
+            unique_llms  = df_resp["LLM"].dropna().unique().tolist() if not df_resp.empty else []
+
+            col_a, col_b, col_c = st.columns(3)
+            col_a.metric("Dates (runs)", len(unique_dates))
+            col_b.metric("LLMs", len(unique_llms))
+            col_c.metric("Responses", len(df_resp))
+
+            c1, c2 = st.columns(2)
+            with c1:
+                st.caption(f"**Dates:** {', '.join(str(d) for d in unique_dates)}")
+            with c2:
+                st.caption(f"**LLMs:** {', '.join(unique_llms)}")
+
+            col_d, col_e = st.columns(2)
+            col_d.metric("Brand mentions", len(df_brand))
+            col_e.metric("Source mentions", len(df_source))
+
+            # Check question matching
+            q_df = run_query(
+                "SELECT id, question FROM ai_questions WHERE project_id = %(pid)s",
+                {"pid": project_id},
+            )
+            q_map = {
+                str(r["question"]).strip().lower(): str(r["id"])
+                for _, r in q_df.iterrows()
+            } if not q_df.empty else {}
+
+            resp_questions = set(
+                str(r).strip().lower()
+                for r in df_resp["AI Questions"].dropna()
+            ) if not df_resp.empty else set()
+            matched   = resp_questions & set(q_map.keys())
+            unmatched = resp_questions - set(q_map.keys())
+
+            if unmatched:
+                st.warning(
+                    f"**{len(matched)}** of {len(resp_questions)} questions matched in DB. "
+                    f"**{len(unmatched)}** not found — responses will be saved with `ai_question_id = NULL`."
+                )
+            else:
+                st.success(f"✅ All {len(matched)} questions matched in DB.")
+
+            # ---------------------------------------------------------------
+            # Import button
+            # ---------------------------------------------------------------
+            already_imported = run_query(
+                "SELECT run_date FROM runs WHERE project_id = %(pid)s "
+                "AND triggered_by = 'manual' AND status = 'completed'",
+                {"pid": project_id},
+            )
+            already_dates = set()
+            if not already_imported.empty and "run_date" in already_imported.columns:
+                already_dates = set(
+                    pd.to_datetime(already_imported["run_date"]).dt.date.tolist()
+                )
+
+            overlap = [d for d in unique_dates if d in already_dates]
+            if overlap:
+                st.warning(
+                    f"⚠ Dates already imported: {', '.join(str(d) for d in overlap)}. "
+                    "Re-importing will create duplicate runs for those dates."
+                )
+
+            if st.button("⬆ Import historical data", type="primary",
+                         key="btn_hist_import"):
+                uploaded_hist.seek(0)
+                wb_imp = _load_wb(uploaded_hist, read_only=True, data_only=True)
+
+                def _load_sheet_imp(name):
+                    ws = wb_imp[name]
+                    rows = [r for r in ws.iter_rows(values_only=True)
+                            if any(c is not None for c in r)]
+                    if len(rows) < 2:
+                        return pd.DataFrame()
+                    df = pd.DataFrame(rows[1:], columns=rows[0])
+                    if "Data" in df.columns:
+                        df["_date"] = pd.to_datetime(df["Data"], errors="coerce").dt.date
+                    return df
+
+                dr = _load_sheet_imp("Risposte - Apps Script")
+                db = _load_sheet_imp("Brand - Apps Script")
+                ds = _load_sheet_imp("Fonti - Apps Script")
+
+                total_runs = 0
+                total_resp = 0
+                total_brand = 0
+                total_source = 0
+                errors = []
+
+                progress = st.progress(0, text="Starting import…")
+                run_dates = sorted(dr["_date"].dropna().unique())
+
+                for i, run_date in enumerate(run_dates):
+                    progress.progress(
+                        (i) / len(run_dates),
+                        text=f"Importing {run_date} ({i+1}/{len(run_dates)})…"
+                    )
+                    resp_group  = dr[dr["_date"] == run_date]
+                    brand_group = db[db["_date"] == run_date] if not db.empty else pd.DataFrame()
+                    source_group = ds[ds["_date"] == run_date] if not ds.empty else pd.DataFrame()
+
+                    llms_in_run = resp_group["LLM"].dropna().unique().tolist()
+                    n_q = len(resp_group)
+
+                    # Create run
+                    try:
+                        with get_engine().begin() as conn:
+                            row = conn.execute(
+                                text(
+                                    "INSERT INTO runs "
+                                    "(project_id, started_at, finished_at, status, "
+                                    " triggered_by, llms, total_questions, completed_questions) "
+                                    "VALUES (:pid, :started, :finished, 'completed', "
+                                    "        'manual', :llms, :total, :total) "
+                                    "RETURNING id"
+                                ),
+                                {
+                                    "pid":     project_id,
+                                    "started": datetime.combine(run_date, datetime.min.time()),
+                                    "finished": datetime.combine(run_date, datetime.min.time()),
+                                    "llms":    llms_in_run,
+                                    "total":   n_q,
+                                },
+                            ).fetchone()
+                        run_id = str(row[0])
+                        total_runs += 1
+                    except Exception as e:
+                        errors.append(f"{run_date}: run creation failed — {e}")
+                        continue
+
+                    # Insert responses + brand + source mentions
+                    for _, rrow in resp_group.iterrows():
+                        q_text  = str(rrow.get("AI Questions", "")).strip()
+                        llm     = str(rrow.get("LLM", "")).strip()
+                        model   = str(rrow.get("Model", "")).strip()
+                        resp_text = str(rrow.get("Risposta", "")).strip() or None
+                        q_id    = q_map.get(q_text.lower())
+
+                        try:
+                            with get_engine().begin() as conn:
+                                ar_row = conn.execute(
+                                    text(
+                                        "INSERT INTO ai_responses "
+                                        "(run_id, ai_question_id, llm, model, "
+                                        " response_text, run_date) "
+                                        "VALUES (:rid, :qid, :llm, :model, :text, :rdate) "
+                                        "RETURNING id"
+                                    ),
+                                    {
+                                        "rid":   run_id,
+                                        "qid":   q_id,
+                                        "llm":   llm,
+                                        "model": model,
+                                        "text":  resp_text,
+                                        "rdate": run_date,
+                                    },
+                                ).fetchone()
+                            response_id = str(ar_row[0])
+                            total_resp += 1
+                        except Exception as e:
+                            errors.append(f"{run_date} / {q_text[:40]}: response failed — {e}")
+                            continue
+
+                        # Brand mentions
+                        b_match = brand_group[
+                            (brand_group["AI Questions"].astype(str).str.strip() == q_text) &
+                            (brand_group["LLM"].astype(str).str.strip() == llm)
+                        ] if not brand_group.empty else pd.DataFrame()
+
+                        if not b_match.empty:
+                            try:
+                                with get_engine().begin() as conn:
+                                    for _, br in b_match.iterrows():
+                                        brand_name = str(br.get("Brand", "")).strip()
+                                        if not brand_name:
+                                            continue
+                                        pos = br.get("Position")
+                                        pos_int = (
+                                            int(pos) if pos is not None and
+                                            not (isinstance(pos, float) and math.isnan(pos))
+                                            else None
+                                        )
+                                        conn.execute(
+                                            text("INSERT INTO brand_mentions "
+                                                 "(ai_response_id, brand_name, position) "
+                                                 "VALUES (:rid, :brand, :pos)"),
+                                            {"rid": response_id, "brand": brand_name, "pos": pos_int},
+                                        )
+                                        total_brand += 1
+                            except Exception as e:
+                                errors.append(f"brand mentions {run_date}/{q_text[:30]}: {e}")
+
+                        # Source mentions
+                        s_match = source_group[
+                            (source_group["AI Questions"].astype(str).str.strip() == q_text) &
+                            (source_group["LLM"].astype(str).str.strip() == llm)
+                        ] if not source_group.empty else pd.DataFrame()
+
+                        if not s_match.empty:
+                            try:
+                                with get_engine().begin() as conn:
+                                    for _, sr in s_match.iterrows():
+                                        url = str(sr.get("URL", "")).strip()
+                                        if not url:
+                                            continue
+                                        conn.execute(
+                                            text("INSERT INTO source_mentions "
+                                                 "(ai_response_id, url) "
+                                                 "VALUES (:rid, :url)"),
+                                            {"rid": response_id, "url": url},
+                                        )
+                                        total_source += 1
+                            except Exception as e:
+                                errors.append(f"source mentions {run_date}/{q_text[:30]}: {e}")
+
+                progress.progress(1.0, text="Import complete.")
+                st.cache_data.clear()
+                fetch_runs.clear()
+
+                if errors:
+                    with st.expander(f"⚠ {len(errors)} error(s) during import"):
+                        for err in errors:
+                            st.text(err)
+
+                st.success(
+                    f"✅ Import complete: "
+                    f"**{total_runs}** run(s) · "
+                    f"**{total_resp}** responses · "
+                    f"**{total_brand}** brand mentions · "
+                    f"**{total_source}** source mentions"
+                )
+                st.rerun()
