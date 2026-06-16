@@ -684,11 +684,17 @@ elif step == 2:
                         counts[tab_label] = n_rows
                         st.caption(f"**{n_rows}** righe")
                         if rows_p:
-                            preview_df = pd.DataFrame(
-                                rows_p[1:min(6, len(rows_p))],
-                                columns=[str(c) for c in rows_p[0][:8]]
-                            )
-                            st.dataframe(preview_df, use_container_width=True, hide_index=True)
+                            header = rows_p[0]
+                            data_rows = rows_p[1:min(6, len(rows_p))]
+                            max_data_cols = max((len(r) for r in data_rows), default=len(header))
+                            n_cols = min(len(header), max_data_cols, 8)
+                            safe_data = [r[:n_cols] for r in data_rows]
+                            safe_cols = [str(c) for c in header[:n_cols]]
+                            try:
+                                preview_df = pd.DataFrame(safe_data, columns=safe_cols)
+                                st.dataframe(preview_df, use_container_width=True, hide_index=True)
+                            except Exception:
+                                st.caption("Preview not available for this sheet.")
                     else:
                         st.warning(f"Foglio '{sheet_name}' non trovato nel file.")
 
