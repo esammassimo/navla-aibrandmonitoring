@@ -884,6 +884,7 @@ def preview_run(
     llms: list[str],
     models: dict[str, str] | None = None,
     sample_size: int = 5,
+    progress_callback: Optional[Callable[[int, int, dict], None]] = None,
 ) -> list[dict]:
     """
     Esegue un campione di chiamate (fino a sample_size domande × tutte le
@@ -893,8 +894,13 @@ def preview_run(
     Usato per verificare rapidamente che le piattaforme/modelli scelti
     funzionino prima di lanciare un run completo.
 
+    progress_callback, se fornito, viene chiamato in modo sincrono (questa
+    funzione è sequenziale, non parallela) dopo ogni singola chiamata, con
+    (completed, total, result_dict) — permette di mostrare un log/tabella
+    live nella UI senza attendere il completamento di tutto il test.
+
     Returns: lista di dict, uno per (domanda × llm), con:
-        {llm, model, question, response_text, sources, brands, error}
+        {llm, model, question, response_text, sources, brands, error, elapsed_s}
     """
     models = models or {}
     sample_size = max(1, min(10, int(sample_size)))
@@ -930,6 +936,8 @@ def preview_run(
 
     _aio_llms = {"aio", "aim"}
     results: list[dict] = []
+    total = len(questions_df) * len(llms)
+    completed = 0
 
     for _, qrow in questions_df.iterrows():
         question = str(qrow["question"])
@@ -939,6 +947,7 @@ def preview_run(
             llm_key = _llm_key(llm)
             query_text = keyword.strip() if keyword.strip() and llm_key in _aio_llms else question
             sel_model = models.get(llm)
+            t0 = time.time()
 
             try:
                 if llm_key == "chatgpt":
@@ -964,7 +973,7 @@ def preview_run(
                 if _is_valid_response(response_text):
                     brands = _extract_brands(response_text, project_brands=project_brands_list)
 
-                results.append({
+                result = {
                     "llm": llm,
                     "model": model_name,
                     "question": question,
@@ -972,10 +981,11 @@ def preview_run(
                     "sources": sources,
                     "brands": [b["brand_name"] for b in brands],
                     "error": error,
-                })
+                    "elapsed_s": round(time.time() - t0, 1),
+                }
 
             except Exception as exc:
-                results.append({
+                result = {
                     "llm": llm,
                     "model": sel_model or "",
                     "question": question,
@@ -983,7 +993,16 @@ def preview_run(
                     "sources": [],
                     "brands": [],
                     "error": str(exc),
-                })
+                    "elapsed_s": round(time.time() - t0, 1),
+                }
+
+            results.append(result)
+            completed += 1
+            if progress_callback:
+                try:
+                    progress_callback(completed, total, result)
+                except Exception:
+                    pass
 
     return results
 

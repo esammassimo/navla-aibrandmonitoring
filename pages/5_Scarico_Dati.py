@@ -336,16 +336,60 @@ else:
         )
 
         if st.button("🧪 Esegui test", key="btn_test_run"):
+            n_total_expected = test_sample_size * len(selected_llms)
             test_status = st.status(
-                f"🧪 Test in corso — {test_sample_size} domande × {len(selected_llms)} piattaforme…",
+                f"🧪 Test in corso — 0/{n_total_expected} chiamate…",
                 expanded=True,
             )
+            log_placeholder = st.empty()
+            table_placeholder = st.empty()
+
+            log_lines: list[str] = []
+            table_rows: list[dict] = []
+
+            def _test_progress(done: int, total: int, result: dict) -> None:
+                icon = "❌" if result["error"] else "✅"
+                model_str = f" ({result['model']})" if result.get("model") else ""
+                elapsed = result.get("elapsed_s", 0)
+
+                if result["error"]:
+                    log_lines.append(
+                        f"{icon} [{done}/{total}] {result['llm']}{model_str} — "
+                        f"{result['question'][:60]} — {elapsed}s — {result['error'][:120]}"
+                    )
+                else:
+                    log_lines.append(
+                        f"{icon} [{done}/{total}] {result['llm']}{model_str} — "
+                        f"{result['question'][:60]} — {elapsed}s — "
+                        f"{len(result['sources'])} fonti, {len(result['brands'])} brand"
+                    )
+
+                test_status.update(label=f"🧪 Test in corso — {done}/{total} chiamate…")
+                log_placeholder.code("\n".join(log_lines[-30:]), language="text")
+
+                table_rows.append({
+                    "Modello": f"{result['llm']}{model_str}",
+                    "Domanda": result["question"][:80],
+                    "Anteprima risposta": (
+                        result["response_text"][:200].replace("\n", " ") + "…"
+                        if result["response_text"] else (result["error"] or "")[:200]
+                    ),
+                    "Brand estratti": ", ".join(result["brands"]) if result["brands"] else "—",
+                    "Tempo": f"{elapsed}s",
+                })
+                table_placeholder.dataframe(
+                    pd.DataFrame(table_rows),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
             try:
                 test_results = preview_run(
                     project_id=project_id,
                     llms=selected_llms,
                     models=selected_models,
                     sample_size=test_sample_size,
+                    progress_callback=_test_progress,
                 )
 
                 n_ok = sum(1 for r in test_results if not r["error"])
@@ -355,26 +399,6 @@ else:
                     state="complete",
                     expanded=True,
                 )
-
-                for r in test_results:
-                    icon = "❌" if r["error"] else "✅"
-                    model_str = f" ({r['model']})" if r.get("model") else ""
-                    header = f"{icon} **{r['llm']}{model_str}** — _{r['question'][:70]}_"
-                    if r["error"]:
-                        st.markdown(header)
-                        st.caption(f"Errore/nessun risultato: {r['error'][:200]}")
-                    else:
-                        snippet = r["response_text"][:200].replace("\n", " ")
-                        st.markdown(header)
-                        st.caption(f"↳ {snippet}…")
-                        meta_bits = []
-                        if r["sources"]:
-                            meta_bits.append(f"{len(r['sources'])} fonti")
-                        if r["brands"]:
-                            meta_bits.append(f"brand: {', '.join(r['brands'][:5])}")
-                        if meta_bits:
-                            st.caption("   ·   ".join(meta_bits))
-                    st.divider()
 
             except ValueError as exc:
                 test_status.update(label="❌ Test non eseguito", state="error", expanded=False)
