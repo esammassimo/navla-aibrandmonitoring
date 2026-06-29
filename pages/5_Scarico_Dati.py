@@ -13,9 +13,13 @@ from sqlalchemy import text
 
 import pipeline as pl
 from pipeline import get_run_log_path
+from brand_extraction import (
+    METHOD_OPTIONS, preview_extraction, run_brand_reextraction,
+)
 from utils import (
     LLM_GROUP,
     fetch_ai_questions,
+    fetch_project_brands,
     fetch_project_schedule,
     fetch_run_workers,
     fetch_runs,
@@ -576,6 +580,175 @@ else:
                     st.rerun()
                 except Exception as exc:
                     st.error(f"Errore durante il retry: {exc}")
+
+# ===========================================================================
+# SECTION 3b — Brand Re-extraction
+# ===========================================================================
+st.divider()
+st.subheader("🔄 Brand Re-extraction")
+st.caption(
+    "Riesegui l'estrazione brand su un run completato con un metodo diverso. "
+    "Puoi testare su un campione (Preview) prima di lanciare l'estrazione completa."
+)
+
+_completed_runs = runs_df[runs_df["status"].isin(["completed", "partial"])] if not runs_df.empty else pd.DataFrame()
+
+if _completed_runs.empty:
+    st.info("Nessun run completato disponibile per la re-estrazione.")
+else:
+    # Selettore run
+    _run_options = {
+        f"{r['started_at'][:16] if r.get('started_at') else '?'} — {r['status']} ({r.get('completed_questions', 0)}/{r.get('total_questions', 0)})": r["id"]
+        for _, r in _completed_runs.iterrows()
+    }
+    _sel_run_label = st.selectbox("Run da processare", list(_run_options.keys()), key="reextract_run")
+    _sel_run_id = _run_options[_sel_run_label]
+
+    # Scelta metodo
+    _sel_method = st.selectbox(
+        "Metodo di estrazione",
+        list(METHOD_OPTIONS.keys()),
+        format_func=lambda x: METHOD_OPTIONS[x],
+        key="reextract_method",
+    )
+
+    # Verifica API key
+    _needs_key = None
+    if "gpt-4o-mini" in _sel_method:
+        _needs_key = "openai"
+    elif "claude-haiku" in _sel_method:
+        _needs_key = "anthropic"
+
+    _api_ok = True
+    if _needs_key:
+        _has_key = bool(st.secrets.get("api_keys", {}).get(_needs_key))
+        if _has_key:
+            st.success(f"✅ API key `{_needs_key}` disponibile")
+        else:
+            st.error(f"❌ API key `{_needs_key}` mancante nei Secrets")
+            _api_ok = False
+
+        # Stima costo
+        _resp_count = run_query(
+            "SELECT COUNT(*) AS n FROM ai_responses "
+            "WHERE run_id = %(rid)s AND response_text IS NOT NULL "
+            "AND response_text != '' AND response_text NOT LIKE 'ERROR:%%' "
+            "AND response_text != 'DISABLED'",
+            {"rid": _sel_run_id},
+        )
+        _n_resp = int(_resp_count.iloc[0]["n"]) if not _resp_count.empty else 0
+        st.caption(f"~{_n_resp} risposte × ~$0.001 = **~${_n_resp * 0.001:.2f}**")
+
+    # Brand list del progetto
+    _pb_df = fetch_project_brands(project_id)
+    _project_brands = _pb_df.to_dict("records") if not _pb_df.empty else None
+    if _project_brands:
+        st.caption(f"Brand list progetto: **{len(_project_brands)}** brand configurati.")
+    else:
+        st.caption("⚠ Nessun brand mappato. L'estrazione userà solo pattern automatici.")
+
+    # Check brand esistenti per resume
+    _existing_df = run_query(
+        "SELECT COUNT(DISTINCT ai_response_id) AS n FROM brand_mentions "
+        "WHERE ai_response_id IN (SELECT id FROM ai_responses WHERE run_id = %(rid)s)",
+        {"rid": _sel_run_id},
+    )
+    _n_existing = int(_existing_df.iloc[0]["n"]) if not _existing_df.empty else 0
+    if _n_existing > 0:
+        st.info(f"Questo run ha brand estratti per **{_n_existing}** risposte.")
+
+    # ─── PREVIEW ─────────────────────────────────────────────────────────
+    st.markdown("**1. Preview** — testa su un campione")
+
+    if st.button("🔍 Preview (5 risposte)", disabled=not _api_ok, key="btn_brand_preview"):
+        with st.spinner("Estrazione campione…"):
+            _preview = preview_extraction(
+                run_id=_sel_run_id,
+                method=_sel_method,
+                project_brands=_project_brands,
+                sample_size=5,
+            )
+        if _preview:
+            for pr in _preview:
+                st.markdown(
+                    f"**{pr['llm']}** — _{pr['question']}_\n\n"
+                    f"> {pr['snippet']}…\n\n"
+                    f"🏷️ **{pr['n_brands']} brand**: {', '.join(pr['brands']) if pr['brands'] else '(nessuno)'}"
+                )
+                st.divider()
+        else:
+            st.warning("Nessuna risposta valida trovata.")
+
+    # ─── ESECUZIONE COMPLETA ─────────────────────────────────────────────
+    st.markdown("**2. Esecuzione**")
+
+    # Stop flag in session state
+    if "brand_extract_stop" not in st.session_state:
+        st.session_state.brand_extract_stop = False
+
+    col_start, col_resume, col_spacer = st.columns([1, 1, 2])
+
+    def _run_extraction(resume_mode: bool):
+        st.session_state.brand_extract_stop = False
+        log_lines: list[str] = []
+
+        progress = st.progress(0, text="Avvio estrazione…")
+        log_container = st.empty()
+        stop_col = st.empty()
+
+        if stop_col.button("⏹ Ferma estrazione", key=f"btn_stop_brand_{resume_mode}"):
+            st.session_state.brand_extract_stop = True
+
+        def _progress(done, total):
+            progress.progress(done / max(total, 1), text=f"Estrazione: {done}/{total}")
+
+        def _log(msg):
+            log_lines.append(msg)
+            log_container.code("\n".join(log_lines[-20:]), language="text")
+
+        result = run_brand_reextraction(
+            run_id=_sel_run_id,
+            method=_sel_method,
+            project_brands=_project_brands,
+            resume=resume_mode,
+            stop_flag=lambda: st.session_state.brand_extract_stop,
+            progress_callback=_progress,
+            log_callback=_log,
+        )
+
+        stop_col.empty()
+
+        if result["stopped"]:
+            progress.progress(
+                (result["processed"] + result["skipped"]) / max(result["processed"] + result["skipped"] + 1, 1),
+                text="🟡 Fermato",
+            )
+            st.warning(
+                f"Fermato: **{result['processed']}** processate, "
+                f"**{result['skipped']}** saltate, "
+                f"**{result['brands_found']}** brand. "
+                f"Usa **Riprendi** per continuare."
+            )
+        else:
+            progress.progress(1.0, text="✅ Completato!")
+            st.success(
+                f"Completato: **{result['processed']}** processate, "
+                f"**{result['skipped']}** saltate, "
+                f"**{result['brands_found']}** brand, "
+                f"{result['errors']} errori."
+            )
+            st.cache_data.clear()
+
+    with col_start:
+        _start_help = "Cancella brand esistenti e riesegue da zero" if _n_existing > 0 else "Avvia estrazione"
+        if st.button("🚀 Avvia", disabled=not _api_ok, key="btn_brand_start", help=_start_help):
+            _run_extraction(resume_mode=False)
+
+    with col_resume:
+        if _n_existing > 0:
+            if st.button("▶ Riprendi", disabled=not _api_ok, key="btn_brand_resume",
+                         help="Riparte dalle risposte non ancora processate"):
+                _run_extraction(resume_mode=True)
 
 # ===========================================================================
 # SECTION 4 — Scheduling  (admin only)
