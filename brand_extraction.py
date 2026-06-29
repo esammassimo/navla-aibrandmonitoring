@@ -77,18 +77,23 @@ def extract_brands_regex(
 ) -> List[Dict]:
     """
     Estrazione brand via regex + markdown bold + match su brand list nota.
+    Applica fuzzy normalization su tutti i brand trovati.
+    Filtra brand con is_excluded.
     Returns: lista di {"brand_name": str, "position": int}
     """
     found = []
     seen: set[str] = set()
     pos = 1
 
-    # Step 1: match esatto su brand list del progetto
+    # Step 1: match esatto su brand list del progetto (esclusi i filtered)
     if project_brands:
+        _, canonical_map = _prepare_brand_mapping(project_brands)
         text_lower = text.lower()
         for pb in project_brands:
+            if pb.get("is_excluded"):
+                continue
             name = pb.get("brand_name", "")
-            canonical = pb.get("canonical_name") or name
+            canonical = (pb.get("canonical_name") or name).strip()
             if name.lower() in text_lower:
                 key = canonical.lower()
                 if key not in seen:
@@ -122,6 +127,11 @@ def extract_brands_regex(
             seen.add(b.lower())
             found.append({"brand_name": b, "position": pos})
             pos += 1
+
+    # Step 4: fuzzy normalization di TUTTI i brand trovati (bold + regex)
+    # contro la brand list del progetto
+    if project_brands and found:
+        found = _normalize_against_known(found, project_brands)
 
     return found
 
@@ -224,26 +234,64 @@ def _call_llm_extraction(
         return []
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Preparazione brand mapping (filtro excluded + canonical map)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _prepare_brand_mapping(project_brands: List[Dict]) -> tuple[list[str], dict[str, str]]:
+    """
+    Filtra brand esclusi e costruisce la mappa per fuzzy matching.
+    Returns: (known_brand_names, canonical_map)
+      - known_brand_names: lista di brand_name (senza is_excluded)
+      - canonical_map: {brand_name_lower: canonical_name}
+    """
+    known = []
+    canonical_map: dict[str, str] = {}
+    for pb in project_brands:
+        if pb.get("is_excluded"):
+            continue
+        name = pb.get("brand_name", "").strip()
+        if not name:
+            continue
+        canonical = (pb.get("canonical_name") or name).strip()
+        known.append(name)
+        canonical_map[name.lower()] = canonical
+    return known, canonical_map
+
+
 def _normalize_against_known(
     extracted: List[Dict],
     project_brands: List[Dict],
+    threshold: int = 85,
 ) -> List[Dict]:
-    canonical_map: dict[str, str] = {}
-    for pb in project_brands:
-        name = pb.get("brand_name", "")
-        canonical = pb.get("canonical_name") or name
-        canonical_map[name.lower()] = canonical
+    """
+    Per ogni brand estratto, cerca il match più vicino nella brand list
+    del progetto usando RapidFuzz token_sort_ratio.
+    Se score >= threshold, rimappa al canonical_name.
+    Filtra brand con is_excluded. Dedup finale.
+    """
+    from rapidfuzz import process, fuzz
+
+    known, canonical_map = _prepare_brand_mapping(project_brands)
+    if not known:
+        return extracted
+
     normalized = []
     seen: set[str] = set()
     for b in extracted:
         name = b["brand_name"]
+        # Fuzzy match against known brands
+        result = process.extractOne(name, known, scorer=fuzz.token_sort_ratio)
+        if result is not None:
+            match, score, _ = result
+            if score >= threshold:
+                name = canonical_map.get(match.lower(), match)
+
         key = name.lower()
-        if key in canonical_map:
-            name = canonical_map[key]
-            key = name.lower()
         if key not in seen:
             seen.add(key)
             normalized.append({**b, "brand_name": name})
+
     return normalized
 
 
@@ -307,34 +355,40 @@ def preview_extraction(
         "AND ar.response_text NOT LIKE 'ERROR:%%' "
         "AND ar.response_text != 'DISABLED' "
         "ORDER BY RANDOM() LIMIT %(n)s",
-        {"rid": run_id, "n": sample_size * 3},  # fetch more, then diversify
+        {"rid": run_id, "n": sample_size * 4},
     )
     if df.empty:
         return []
 
-    # Diversifica: una per LLM se possibile
-    sample = []
-    llms_seen = set()
-    for _, row in df.iterrows():
+    # Converti tutto in lista di dict per evitare problemi con pandas Series
+    all_rows = df.to_dict("records")
+
+    # Diversifica: una per LLM se possibile, poi riempi
+    sample: list[dict] = []
+    used_ids: set = set()
+    llms_seen: set[str] = set()
+
+    for row in all_rows:
         if row["llm"] not in llms_seen and len(sample) < sample_size:
             sample.append(row)
+            used_ids.add(row["id"])
             llms_seen.add(row["llm"])
-    for _, row in df.iterrows():
-        r_dict = row.to_dict() if hasattr(row, 'to_dict') else row
-        if len(sample) < sample_size and not any(
-            s["id"] == row["id"] if isinstance(s, dict) else s.get("id") == row["id"]
-            for s in sample
-        ):
+
+    for row in all_rows:
+        if len(sample) >= sample_size:
+            break
+        if row["id"] not in used_ids:
             sample.append(row)
+            used_ids.add(row["id"])
 
     results = []
     for row in sample:
-        text = str(row["response_text"])
-        brands = _extract(text, method, project_brands)
+        resp_text = str(row.get("response_text", ""))
+        brands = _extract(resp_text, method, project_brands)
         results.append({
-            "llm": row["llm"],
-            "question": str(row["question"])[:60],
-            "snippet": text[:150].replace("\n", " "),
+            "llm": str(row.get("llm", "")),
+            "question": str(row.get("question", ""))[:60],
+            "snippet": resp_text[:150].replace("\n", " "),
             "brands": [b["brand_name"] for b in brands],
             "n_brands": len(brands),
         })
@@ -393,7 +447,8 @@ def run_brand_reextraction(
         _log("Nessuna risposta valida trovata.")
         return {"processed": 0, "skipped": 0, "brands_found": 0, "errors": 0, "stopped": False}
 
-    total = len(resp_df)
+    all_rows = resp_df.to_dict("records")
+    total = len(all_rows)
 
     # Resume: trova risposte che hanno già brand
     already_done: set[str] = set()
@@ -426,7 +481,7 @@ def run_brand_reextraction(
     errors = 0
     stopped = False
 
-    for _, row in resp_df.iterrows():
+    for row in all_rows:
         # Stop check
         if stop_flag and stop_flag():
             _log(f"⏹️ Fermato dopo {processed} risposte processate.")
