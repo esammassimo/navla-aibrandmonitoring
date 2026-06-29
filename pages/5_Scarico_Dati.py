@@ -661,14 +661,15 @@ else:
     st.markdown("**1. Preview** — testa su un campione")
 
     if st.button("🔍 Preview (5 risposte)", disabled=not _api_ok, key="btn_brand_preview"):
-        with st.spinner("Estrazione campione…"):
-            _preview = preview_extraction(
-                run_id=_sel_run_id,
-                method=_sel_method,
-                project_brands=_project_brands,
-                sample_size=5,
-            )
+        preview_status = st.status("🔍 Estrazione campione in corso…", expanded=True)
+        _preview = preview_extraction(
+            run_id=_sel_run_id,
+            method=_sel_method,
+            project_brands=_project_brands,
+            sample_size=5,
+        )
         if _preview:
+            preview_status.update(label=f"✅ Preview completata — {sum(p['n_brands'] for p in _preview)} brand trovati", state="complete", expanded=True)
             for pr in _preview:
                 st.markdown(
                     f"**{pr['llm']}** — _{pr['question']}_\n\n"
@@ -677,6 +678,7 @@ else:
                 )
                 st.divider()
         else:
+            preview_status.update(label="⚠ Nessuna risposta valida", state="error", expanded=False)
             st.warning("Nessuna risposta valida trovata.")
 
     # ─── ESECUZIONE COMPLETA ─────────────────────────────────────────────
@@ -690,21 +692,24 @@ else:
 
     def _run_extraction(resume_mode: bool):
         st.session_state.brand_extract_stop = False
-        log_lines: list[str] = []
 
         progress = st.progress(0, text="Avvio estrazione…")
-        log_container = st.empty()
-        stop_col = st.empty()
+        status = st.status("🔄 Estrazione brand in corso…", expanded=True)
+        stop_placeholder = st.empty()
 
-        if stop_col.button("⏹ Ferma estrazione", key=f"btn_stop_brand_{resume_mode}"):
+        if stop_placeholder.button("⏹ Ferma estrazione", key=f"btn_stop_brand_{resume_mode}"):
             st.session_state.brand_extract_stop = True
 
+        log_lines: list[str] = []
+
         def _progress(done, total):
-            progress.progress(done / max(total, 1), text=f"Estrazione: {done}/{total}")
+            pct = done / max(total, 1)
+            progress.progress(pct, text=f"Estrazione: {done}/{total} ({pct:.0%})")
 
         def _log(msg):
             log_lines.append(msg)
-            log_container.code("\n".join(log_lines[-20:]), language="text")
+            # Mostra ultime 25 righe nel status container
+            status.text("\n".join(log_lines[-25:]))
 
         result = run_brand_reextraction(
             run_id=_sel_run_id,
@@ -716,13 +721,14 @@ else:
             log_callback=_log,
         )
 
-        stop_col.empty()
+        stop_placeholder.empty()
 
         if result["stopped"]:
             progress.progress(
                 (result["processed"] + result["skipped"]) / max(result["processed"] + result["skipped"] + 1, 1),
                 text="🟡 Fermato",
             )
+            status.update(label="🟡 Fermato dall'utente", state="error", expanded=False)
             st.warning(
                 f"Fermato: **{result['processed']}** processate, "
                 f"**{result['skipped']}** saltate, "
@@ -731,6 +737,7 @@ else:
             )
         else:
             progress.progress(1.0, text="✅ Completato!")
+            status.update(label="✅ Estrazione completata", state="complete", expanded=False)
             st.success(
                 f"Completato: **{result['processed']}** processate, "
                 f"**{result['skipped']}** saltate, "
