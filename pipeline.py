@@ -879,6 +879,115 @@ def _worker(
 _ITERABLE_LLMS = {"ChatGPT", "Claude", "Gemini", "Perplexity"}  # display names (UI sends these)
 
 
+def preview_run(
+    project_id: str,
+    llms: list[str],
+    models: dict[str, str] | None = None,
+    sample_size: int = 5,
+) -> list[dict]:
+    """
+    Esegue un campione di chiamate (fino a sample_size domande × tutte le
+    llms selezionate) senza scrivere nulla nel DB — né runs, né run_workers,
+    né ai_responses, né brand_mentions/source_citations.
+
+    Usato per verificare rapidamente che le piattaforme/modelli scelti
+    funzionino prima di lanciare un run completo.
+
+    Returns: lista di dict, uno per (domanda × llm), con:
+        {llm, model, question, response_text, sources, brands, error}
+    """
+    models = models or {}
+    sample_size = max(1, min(10, int(sample_size)))
+
+    # --- Load a sample of active questions (with keyword text for AIO/AIM) ---
+    questions_df = run_query(
+        "SELECT aq.id, aq.question, COALESCE(k.keyword, '') AS keyword "
+        "FROM ai_questions aq "
+        "LEFT JOIN keywords k ON k.id = aq.keyword_id "
+        "WHERE aq.project_id = %(pid)s AND aq.status = 'active' "
+        "ORDER BY RANDOM() LIMIT %(n)s",
+        {"pid": project_id, "n": sample_size},
+    )
+    if questions_df.empty:
+        raise ValueError("No active AI questions found for this project.")
+
+    # --- Load project metadata (language/country for AIO/Gemini) ---
+    proj_df = run_query(
+        "SELECT language, country FROM projects WHERE id = %(pid)s",
+        {"pid": project_id},
+    )
+    if proj_df.empty:
+        raise ValueError(f"Project {project_id} not found.")
+    language = str(proj_df.iloc[0]["language"])
+    country = str(proj_df.iloc[0]["country"])
+
+    # --- Load project brands for fuzzy normalization (best-effort) ---
+    pb_df = run_query(
+        "SELECT brand_name, canonical_name FROM project_brands WHERE project_id = %(pid)s",
+        {"pid": project_id},
+    )
+    project_brands_list: list[dict] = pb_df.to_dict("records") if not pb_df.empty else []
+
+    _aio_llms = {"aio", "aim"}
+    results: list[dict] = []
+
+    for _, qrow in questions_df.iterrows():
+        question = str(qrow["question"])
+        keyword = str(qrow.get("keyword", ""))
+
+        for llm in llms:
+            llm_key = _llm_key(llm)
+            query_text = keyword.strip() if keyword.strip() and llm_key in _aio_llms else question
+            sel_model = models.get(llm)
+
+            try:
+                if llm_key == "chatgpt":
+                    response_text, sources, model_name = _call_chatgpt(question, country, model=sel_model or "gpt-5.4")
+                elif llm_key == "claude":
+                    response_text, sources, model_name = _call_claude(question, model=sel_model or "claude-sonnet-4-6")
+                elif llm_key == "gemini":
+                    response_text, sources, model_name = _call_gemini(question, country, language, model=sel_model)
+                elif llm_key == "perplexity":
+                    response_text, sources, model_name = _call_perplexity(question, model=sel_model or "sonar-pro")
+                elif llm_key == "aio":
+                    response_text, sources, model_name = _call_aio(query_text, country, language)
+                elif llm_key == "aim":
+                    response_text, sources, model_name = _call_aim(query_text, country, language)
+                else:
+                    response_text, sources, model_name = f"ERROR: unknown LLM '{llm}'", [], ""
+
+                error = None
+                if not _is_valid_response(response_text):
+                    error = str(response_text) if response_text else "Nessun risultato"
+
+                brands: list[dict] = []
+                if _is_valid_response(response_text):
+                    brands = _extract_brands(response_text, project_brands=project_brands_list)
+
+                results.append({
+                    "llm": llm,
+                    "model": model_name,
+                    "question": question,
+                    "response_text": response_text if _is_valid_response(response_text) else "",
+                    "sources": sources,
+                    "brands": [b["brand_name"] for b in brands],
+                    "error": error,
+                })
+
+            except Exception as exc:
+                results.append({
+                    "llm": llm,
+                    "model": sel_model or "",
+                    "question": question,
+                    "response_text": "",
+                    "sources": [],
+                    "brands": [],
+                    "error": str(exc),
+                })
+
+    return results
+
+
 def start_run(
     project_id: str,
     llms: list[str],

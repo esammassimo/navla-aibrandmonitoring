@@ -12,7 +12,7 @@ import streamlit as st
 from sqlalchemy import text
 
 import pipeline as pl
-from pipeline import get_run_log_path, AVAILABLE_MODELS
+from pipeline import get_run_log_path, AVAILABLE_MODELS, preview_run
 from brand_extraction import (
     METHOD_OPTIONS, preview_extraction, run_brand_reextraction,
 )
@@ -319,6 +319,69 @@ else:
                     selected_models[llm_name] = st.selectbox(
                         llm_name, options=options, index=0, key=f"model_{llm_name}"
                     )
+
+    # --- Test rapido (preview, nessuna scrittura su DB) -------------------
+    if selected_llms:
+        st.divider()
+        st.markdown("**Test**")
+        st.caption(
+            "Verifica rapidamente che piattaforme e modelli scelti funzionino, "
+            "prima di lanciare il run completo. Non scrive nulla nel database."
+        )
+
+        test_sample_size = st.slider(
+            "Numero di domande da testare",
+            min_value=1, max_value=10, value=3,
+            key="test_sample_size",
+        )
+
+        if st.button("🧪 Esegui test", key="btn_test_run"):
+            test_status = st.status(
+                f"🧪 Test in corso — {test_sample_size} domande × {len(selected_llms)} piattaforme…",
+                expanded=True,
+            )
+            try:
+                test_results = preview_run(
+                    project_id=project_id,
+                    llms=selected_llms,
+                    models=selected_models,
+                    sample_size=test_sample_size,
+                )
+
+                n_ok = sum(1 for r in test_results if not r["error"])
+                n_err = sum(1 for r in test_results if r["error"])
+                test_status.update(
+                    label=f"✅ Test completato — {n_ok} OK, {n_err} con errori/nessun risultato",
+                    state="complete",
+                    expanded=True,
+                )
+
+                for r in test_results:
+                    icon = "❌" if r["error"] else "✅"
+                    model_str = f" ({r['model']})" if r.get("model") else ""
+                    header = f"{icon} **{r['llm']}{model_str}** — _{r['question'][:70]}_"
+                    if r["error"]:
+                        st.markdown(header)
+                        st.caption(f"Errore/nessun risultato: {r['error'][:200]}")
+                    else:
+                        snippet = r["response_text"][:200].replace("\n", " ")
+                        st.markdown(header)
+                        st.caption(f"↳ {snippet}…")
+                        meta_bits = []
+                        if r["sources"]:
+                            meta_bits.append(f"{len(r['sources'])} fonti")
+                        if r["brands"]:
+                            meta_bits.append(f"brand: {', '.join(r['brands'][:5])}")
+                        if meta_bits:
+                            st.caption("   ·   ".join(meta_bits))
+                    st.divider()
+
+            except ValueError as exc:
+                test_status.update(label="❌ Test non eseguito", state="error", expanded=False)
+                st.error(str(exc))
+            except Exception as exc:
+                test_status.update(label="❌ Test interrotto da un errore", state="error", expanded=False)
+                st.error(f"Errore durante il test: {exc}")
 
     with st.form("form_manual_run"):
         # Iterations slider — only meaningful for iterable LLMs
