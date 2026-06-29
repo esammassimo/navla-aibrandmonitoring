@@ -87,13 +87,21 @@ def extract_brands_regex(
 
     # Step 1: match esatto su brand list del progetto (esclusi i filtered)
     if project_brands:
+        import math
         _, canonical_map = _prepare_brand_mapping(project_brands)
         text_lower = text.lower()
         for pb in project_brands:
             if pb.get("is_excluded"):
                 continue
-            name = pb.get("brand_name", "")
-            canonical = (pb.get("canonical_name") or name).strip()
+            raw_name = pb.get("brand_name")
+            if not raw_name or not isinstance(raw_name, str):
+                continue
+            name = raw_name.strip()
+            raw_can = pb.get("canonical_name")
+            if raw_can is None or not isinstance(raw_can, str):
+                canonical = name
+            else:
+                canonical = raw_can.strip() or name
             if name.lower() in text_lower:
                 key = canonical.lower()
                 if key not in seen:
@@ -242,18 +250,26 @@ def _prepare_brand_mapping(project_brands: List[Dict]) -> tuple[list[str], dict[
     """
     Filtra brand esclusi e costruisce la mappa per fuzzy matching.
     Returns: (known_brand_names, canonical_map)
-      - known_brand_names: lista di brand_name (senza is_excluded)
-      - canonical_map: {brand_name_lower: canonical_name}
     """
+    import math
+
     known = []
     canonical_map: dict[str, str] = {}
     for pb in project_brands:
         if pb.get("is_excluded"):
             continue
-        name = pb.get("brand_name", "").strip()
+        raw_name = pb.get("brand_name")
+        if not raw_name or not isinstance(raw_name, str):
+            continue
+        name = raw_name.strip()
         if not name:
             continue
-        canonical = (pb.get("canonical_name") or name).strip()
+        # canonical_name può essere None, NaN, o stringa
+        raw_canonical = pb.get("canonical_name")
+        if raw_canonical is None or not isinstance(raw_canonical, str) or (isinstance(raw_canonical, float) and math.isnan(raw_canonical)):
+            canonical = name
+        else:
+            canonical = raw_canonical.strip() or name
         known.append(name)
         canonical_map[name.lower()] = canonical
     return known, canonical_map
