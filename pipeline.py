@@ -112,12 +112,23 @@ GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash"]
 # se l'utente non sceglie nulla di diverso).
 # ---------------------------------------------------------------------------
 AVAILABLE_MODELS: dict[str, list[str]] = {
-    "ChatGPT": ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini"],
+    # gpt-4o non è più sul listino prezzi ufficiale OpenAI (sostituito dalla
+    # famiglia 5.4/5.5) — gpt-5.4 è il nuovo default: stesso ruolo "workhorse
+    # di produzione" a $2.50/$15 per M token, contro $5/$30 di gpt-5.5.
+    "ChatGPT": ["gpt-5.4", "gpt-5.4-mini", "gpt-5.5", "gpt-4o-mini"],
+    # claude-sonnet-4-6 resta il default: a $3/$15 per M token è il punto di
+    # equilibrio qualità/costo per task ripetitivi di question-answering con
+    # web search. Opus 4.8 ($5/$25, +67%) non aggiunge valore per questo
+    # caso d'uso — riservato a chi vuole testare reasoning più approfondito.
     "Claude": [
-        "claude-sonnet-4-6", "claude-opus-4-7",
-        "claude-haiku-4-5-20251001", "claude-sonnet-4-5-20250929",
+        "claude-sonnet-4-6", "claude-haiku-4-5-20251001",
+        "claude-opus-4-8", "claude-sonnet-4-5-20250929",
     ],
-    "Gemini": ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
+    # gemini-2.5-flash resta il default: gemini-3.5-flash costa 5x sull'input
+    # e 3.6x sull'output per un guadagno di qualità non necessario in un
+    # task di brand monitoring — disponibile come opzione se serve.
+    "Gemini": ["gemini-2.5-flash", "gemini-3.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
+    # sonar-pro: nessuna variazione di prezzo nel 2026, resta il default.
     "Perplexity": ["sonar-pro", "sonar", "sonar-reasoning-pro"],
 }
 
@@ -196,7 +207,7 @@ def _extract_urls_from_text(text: str) -> list[str]:
 # Each returns (response_text, sources, model_name)
 # ===========================================================================
 
-def _call_chatgpt(question: str, country: str, model: str = "gpt-4o") -> tuple[str, list[str], str]:
+def _call_chatgpt(question: str, country: str, model: str = "gpt-5.4") -> tuple[str, list[str], str]:
     key = _secrets().get("api_keys", {}).get("openai", "")
     if not key:
         return "DISABLED", [], ""
@@ -804,7 +815,7 @@ def _worker(
         llm_key = _llm_key(llm)
         sel_model = models_by_llm.get(llm)  # display name key, e.g. "ChatGPT"
         if llm_key == "chatgpt":
-            response_text, sources, model_name = _call_chatgpt(question, country, model=sel_model or "gpt-4o")
+            response_text, sources, model_name = _call_chatgpt(question, country, model=sel_model or "gpt-5.4")
         elif llm_key == "claude":
             response_text, sources, model_name = _call_claude(question, model=sel_model or "claude-sonnet-4-6")
         elif llm_key == "gemini":
