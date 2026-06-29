@@ -598,7 +598,7 @@ if _completed_runs.empty:
 else:
     # Selettore run
     _run_options = {
-        f"{r['started_at'][:16] if r.get('started_at') else '?'} — {r['status']} ({r.get('completed_questions', 0)}/{r.get('total_questions', 0)})": r["id"]
+        f"{str(r.get('started_at', '?'))[:16]} — {r['status']} ({r.get('completed_questions', 0)}/{r.get('total_questions', 0)})": r["id"]
         for _, r in _completed_runs.iterrows()
     }
     _sel_run_label = st.selectbox("Run da processare", list(_run_options.keys()), key="reextract_run")
