@@ -106,6 +106,21 @@ Text:
 
 GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash"]
 
+# ---------------------------------------------------------------------------
+# Modelli disponibili per LLM, selezionabili a run-time dalla UI.
+# Il primo elemento di ogni lista è il default storico (comportamento invariato
+# se l'utente non sceglie nulla di diverso).
+# ---------------------------------------------------------------------------
+AVAILABLE_MODELS: dict[str, list[str]] = {
+    "ChatGPT": ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini"],
+    "Claude": [
+        "claude-sonnet-4-6", "claude-opus-4-7",
+        "claude-haiku-4-5-20251001", "claude-sonnet-4-5-20250929",
+    ],
+    "Gemini": ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
+    "Perplexity": ["sonar-pro", "sonar", "sonar-reasoning-pro"],
+}
+
 # Category label stored in DB alongside llm name — used by Looker Studio
 LLM_CATEGORY: dict[str, str] = {
     "ChatGPT":      "LLM",
@@ -181,7 +196,7 @@ def _extract_urls_from_text(text: str) -> list[str]:
 # Each returns (response_text, sources, model_name)
 # ===========================================================================
 
-def _call_chatgpt(question: str, country: str) -> tuple[str, list[str], str]:
+def _call_chatgpt(question: str, country: str, model: str = "gpt-4o") -> tuple[str, list[str], str]:
     key = _secrets().get("api_keys", {}).get("openai", "")
     if not key:
         return "DISABLED", [], ""
@@ -190,7 +205,6 @@ def _call_chatgpt(question: str, country: str) -> tuple[str, list[str], str]:
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
     }
-    model = "gpt-4o"
 
     # --- Try Responses API first ---
     payload = {
@@ -255,12 +269,11 @@ def _call_chatgpt(question: str, country: str) -> tuple[str, list[str], str]:
         return f"ERROR: {exc}", [], model
 
 
-def _call_claude(question: str) -> tuple[str, list[str], str]:
+def _call_claude(question: str, model: str = "claude-sonnet-4-6") -> tuple[str, list[str], str]:
     key = _secrets().get("api_keys", {}).get("anthropic", "")
     if not key:
         return "DISABLED", [], ""
 
-    model = "claude-sonnet-4-6"
     headers = {
         "x-api-key": key,
         "anthropic-version": "2023-06-01",
@@ -295,7 +308,7 @@ def _call_claude(question: str) -> tuple[str, list[str], str]:
         return f"ERROR: {exc}", [], model
 
 
-def _call_gemini(question: str, country: str, language: str) -> tuple[str, list[str], str]:
+def _call_gemini(question: str, country: str, language: str, model: str | None = None) -> tuple[str, list[str], str]:
     key = _secrets().get("api_keys", {}).get("google", "")
     if not key:
         return "DISABLED", [], ""
@@ -313,23 +326,26 @@ def _call_gemini(question: str, country: str, language: str) -> tuple[str, list[
 
     last_exc: Exception = Exception("No model tried")
 
-    for model in GEMINI_MODELS:
+    # Modello scelto dall'utente provato per primo, poi fallback alla catena standard
+    models_to_try = [model] + [m for m in GEMINI_MODELS if m != model] if model else GEMINI_MODELS
+
+    for m in models_to_try:
         try:
             resp = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent",
                 headers=headers,
                 json=payload,
                 timeout=60,
             )
             if resp.status_code == 404:
-                logger.warning("Gemini %s returned 404 — skipping", model)
+                logger.warning("Gemini %s returned 404 — skipping", m)
                 continue
             if resp.status_code == 400:
                 try:
                     err_body = resp.json()
                 except Exception:
                     err_body = resp.text[:300]
-                logger.error("Gemini %s returned 400 — body: %s", model, str(err_body)[:500])
+                logger.error("Gemini %s returned 400 — body: %s", m, str(err_body)[:500])
                 last_exc = Exception(f"400 Bad Request: {str(err_body)[:300]}")
                 continue
             resp.raise_for_status()
@@ -359,21 +375,20 @@ def _call_gemini(question: str, country: str, language: str) -> tuple[str, list[
                         url = _resolve_redirect(url)
                     sources.append(url)
 
-            return full_text, sources, model
+            return full_text, sources, m
 
         except Exception as exc:
             last_exc = exc
-            logger.warning("Gemini %s error: %s", model, exc)
+            logger.warning("Gemini %s error: %s", m, exc)
 
-    return f"ERROR: {last_exc}", [], GEMINI_MODELS[-1]
+    return f"ERROR: {last_exc}", [], models_to_try[-1] if models_to_try else GEMINI_MODELS[-1]
 
 
-def _call_perplexity(question: str) -> tuple[str, list[str], str]:
+def _call_perplexity(question: str, model: str = "sonar-pro") -> tuple[str, list[str], str]:
     key = _secrets().get("api_keys", {}).get("perplexity", "")
     if not key:
         return "DISABLED", [], ""
 
-    model = "sonar-pro"
     payload = {
         "model": model,
         "messages": [
@@ -763,28 +778,39 @@ def _worker(
     collect: str = "both",
     run_logger: logging.Logger | None = None,
     keyword: str = "",
-) -> None:
-    """Execute one (question × LLM) unit of work."""
+    models_by_llm: dict[str, str] | None = None,
+) -> str:
+    """
+    Execute one (question × LLM) unit of work.
+
+    Returns a short human-readable summary line describing the outcome.
+    This is returned (not pushed via callback) so the caller can safely
+    relay it to UI callbacks from the main thread — Streamlit widgets
+    cannot be touched from worker threads.
+    """
     rl = run_logger or logger
     q_short = question[:80]
     # AIO and AI Mode use the keyword as query; conversational LLMs use the full question
     _aio_llms = {"aio", "aim"}
     query_text = keyword.strip() if keyword.strip() and _llm_key(llm) in _aio_llms else question
+    models_by_llm = models_by_llm or {}
+    summary_line = ""
 
     try:
         _db_update_worker_running(worker_id)
         rl.info("[%s] START  question='%s'", llm, q_short)
 
-        # --- Call the appropriate LLM ---
+        # --- Call the appropriate LLM (with user-selected model if provided) ---
         llm_key = _llm_key(llm)
+        sel_model = models_by_llm.get(llm)  # display name key, e.g. "ChatGPT"
         if llm_key == "chatgpt":
-            response_text, sources, model_name = _call_chatgpt(question, country)
+            response_text, sources, model_name = _call_chatgpt(question, country, model=sel_model or "gpt-4o")
         elif llm_key == "claude":
-            response_text, sources, model_name = _call_claude(question)
+            response_text, sources, model_name = _call_claude(question, model=sel_model or "claude-sonnet-4-6")
         elif llm_key == "gemini":
-            response_text, sources, model_name = _call_gemini(question, country, language)
+            response_text, sources, model_name = _call_gemini(question, country, language, model=sel_model)
         elif llm_key == "perplexity":
-            response_text, sources, model_name = _call_perplexity(question)
+            response_text, sources, model_name = _call_perplexity(question, model=sel_model or "sonar-pro")
         elif llm_key == "aio":
             response_text, sources, model_name = _call_aio(query_text, country, language)
         elif llm_key == "aim":
@@ -795,9 +821,11 @@ def _worker(
         if not _is_valid_response(response_text):
             rl.warning("[%s] INVALID response for question='%s' — value: %s",
                        llm, q_short, str(response_text)[:120])
+            summary_line = f"⚠️ {llm} ({model_name or '—'}) — {q_short} → risposta non valida: {str(response_text)[:80]}"
         else:
             rl.info("[%s] OK  model=%s  sources=%d  chars=%d  question='%s'",
                     llm, model_name, len(sources), len(response_text or ""), q_short)
+            summary_line = f"✅ {llm} ({model_name}) — {q_short} → {len(sources)} fonti, {len(response_text or '')} caratteri"
 
         # --- Persist response ---
         response_id = _db_insert_response(
@@ -813,6 +841,7 @@ def _worker(
                 brands = _extract_brands(response_text, project_brands=project_brands)
                 _db_insert_brands(response_id, brands)
                 rl.info("[%s] Saved %d brand(s)  question='%s'", llm, len(brands), q_short)
+                summary_line += f"  ·  {len(brands)} brand"
 
         _db_complete_worker(worker_id, "completed")
         rl.info("[%s] DONE  question='%s'", llm, q_short)
@@ -820,12 +849,15 @@ def _worker(
     except Exception as exc:
         logger.error("Worker %s (%s × %s) failed: %s", worker_id, llm, question[:60], exc)
         rl.error("[%s] FAILED  question='%s'  error=%s", llm, q_short, str(exc))
+        summary_line = f"❌ {llm} — {q_short} → ERRORE: {exc}"
         _db_complete_worker(worker_id, "failed", str(exc)[:500])
 
     finally:
         _db_increment_completed(run_id)
         if delay > 0:
             time.sleep(delay)
+
+    return summary_line
 
 
 # ===========================================================================
@@ -843,6 +875,8 @@ def start_run(
     progress_callback: Optional[Callable[[int, int], None]] = None,
     iterations: int = 1,
     collect: str = "both",
+    models: dict[str, str] | None = None,
+    worker_log_callback: Optional[Callable[[str], None]] = None,
 ) -> str:
     """
     Create a run, launch all workers in parallel, wait for completion.
@@ -856,6 +890,13 @@ def start_run(
                            (chatgpt, claude, gemini, perplexity). aio and aim
                            always run once. Min 1, no upper limit enforced here.
         collect:           What to extract from responses: 'brands', 'sources', or 'both'.
+        models:            Optional dict mapping LLM display name -> model id,
+                           e.g. {"ChatGPT": "gpt-4o-mini", "Claude": "claude-haiku-4-5-20251001"}.
+                           Only applies to conversational LLMs (ChatGPT/Claude/Gemini/Perplexity).
+                           AI Overviews / AI Mode are unaffected (no model choice).
+        worker_log_callback: Optional callback(log_line: str) called after each worker
+                           completes, for live reporting in the UI (independent from
+                           progress_callback which only reports counts).
 
     Returns:
         run_id as string.
@@ -864,6 +905,7 @@ def start_run(
     secrets = _secrets()
     max_workers: int = int(secrets.get("pipeline", {}).get("max_workers", 4))
     delay: float = float(secrets.get("pipeline", {}).get("request_delay_seconds", 1))
+    models = models or {}
 
     # --- Load active questions (with keyword text for AIO/AIM) ---
     questions_df = run_query(
@@ -981,6 +1023,7 @@ def start_run(
                         _worker,
                         run_id, worker_id, ai_question_id, question,
                         llm, country, language, delay, project_brands_list, collect, run_log, kw,
+                        models,
                     )
                     futures[fut] = worker_id
 
@@ -994,6 +1037,13 @@ def start_run(
                     exc = fut.exception()
                     if exc:
                         logger.error("Unhandled future exception: %s", exc)
+                    elif worker_log_callback:
+                        try:
+                            summary_line = fut.result()
+                            if summary_line:
+                                worker_log_callback(summary_line)
+                        except Exception:
+                            pass
     finally:
         # Always finalise the run — even if Streamlit session drops or an
         # unexpected exception propagates out of the executor block.

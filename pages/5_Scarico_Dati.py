@@ -12,7 +12,7 @@ import streamlit as st
 from sqlalchemy import text
 
 import pipeline as pl
-from pipeline import get_run_log_path
+from pipeline import get_run_log_path, AVAILABLE_MODELS
 from brand_extraction import (
     METHOD_OPTIONS, preview_extraction, run_brand_reextraction,
 )
@@ -285,23 +285,42 @@ if n_active == 0:
 else:
     st.caption(f"Domande attive: **{n_active}**")
 
-    with st.form("form_manual_run"):
-        st.markdown("**LLMs to query**")
-        col_llm_f, col_ai_f = st.columns(2)
-        with col_llm_f:
-            sel_llms_llm = st.multiselect(
-                "LLM",
-                options=LLM_GROUP["LLM"],
-                default=LLM_GROUP["LLM"],
-            )
-        with col_ai_f:
-            sel_llms_ai = st.multiselect(
-                "AI Features",
-                options=LLM_GROUP["AI Features"],
-                default=LLM_GROUP["AI Features"],
-            )
-        selected_llms = sel_llms_llm + sel_llms_ai
+    # LLM selection lives outside the form so the model pickers below can
+    # react immediately to which LLMs are checked.
+    st.markdown("**LLMs to query**")
+    col_llm_f, col_ai_f = st.columns(2)
+    with col_llm_f:
+        sel_llms_llm = st.multiselect(
+            "LLM",
+            options=LLM_GROUP["LLM"],
+            default=LLM_GROUP["LLM"],
+            key="manual_run_llm",
+        )
+    with col_ai_f:
+        sel_llms_ai = st.multiselect(
+            "AI Features",
+            options=LLM_GROUP["AI Features"],
+            default=LLM_GROUP["AI Features"],
+            key="manual_run_ai",
+        )
+    selected_llms = sel_llms_llm + sel_llms_ai
 
+    # --- Model selection per conversational LLM ---------------------------
+    # AI Overviews / AI Mode have no model choice (Google decides server-side).
+    selected_models: dict[str, str] = {}
+    if sel_llms_llm:
+        st.markdown("**Modello per LLM**")
+        st.caption("Non si applica a AI Overviews / AI Mode, che non espongono una scelta di modello.")
+        model_cols = st.columns(len(sel_llms_llm))
+        for col, llm_name in zip(model_cols, sel_llms_llm):
+            with col:
+                options = AVAILABLE_MODELS.get(llm_name, [])
+                if options:
+                    selected_models[llm_name] = st.selectbox(
+                        llm_name, options=options, index=0, key=f"model_{llm_name}"
+                    )
+
+    with st.form("form_manual_run"):
         # Iterations slider — only meaningful for iterable LLMs
         iterable_selected = [l for l in selected_llms if l in _ITERABLE_LLMS] if selected_llms else []
         iterations = st.number_input(
@@ -330,14 +349,29 @@ else:
         if not selected_llms:
             st.error("Please select at least one LLM.")
         else:
-            total_workers = n_active * len(selected_llms)
             progress_bar = st.progress(0, text="Avvio in corso…")
-            status_text = st.empty()
+            run_status = st.status("🚀 Run in corso…", expanded=True)
+            stop_placeholder = st.empty()  # reserved for future stop support
+
+            log_lines: list[str] = []
+            _counts = {"ok": 0, "invalid": 0, "error": 0}
 
             def _progress_cb(done: int, total: int) -> None:
                 pct = done / total if total else 0
-                progress_bar.progress(pct, text=f"Worker completati: {done}/{total}")
-                status_text.caption(f"In esecuzione… {done}/{total}")
+                progress_bar.progress(pct, text=f"Worker completati: {done}/{total} ({pct:.0%})")
+
+            def _worker_log_cb(msg: str) -> None:
+                if msg.startswith("✅"):
+                    _counts["ok"] += 1
+                elif msg.startswith("⚠️"):
+                    _counts["invalid"] += 1
+                elif msg.startswith("❌"):
+                    _counts["error"] += 1
+                log_lines.append(msg)
+                summary = f"OK: {_counts['ok']}  ⚠ invalid: {_counts['invalid']}  ❌ error: {_counts['error']}"
+                run_status.update(label=f"🚀 Run in corso… — {summary}")
+                # Show the most recent lines, latest first, capped to keep UI light
+                run_status.text("\n".join(reversed(log_lines[-40:])))
 
             try:
                 run_id = pl.start_run(
@@ -347,14 +381,22 @@ else:
                     progress_callback=_progress_cb,
                     iterations=int(iterations),
                     collect="both",
+                    models=selected_models,
+                    worker_log_callback=_worker_log_cb,
                 )
                 progress_bar.progress(1.0, text="Run completato.")
-                status_text.empty()
+                run_status.update(
+                    label=f"✅ Run completato — OK: {_counts['ok']}  ⚠ invalid: {_counts['invalid']}  ❌ error: {_counts['error']}",
+                    state="complete",
+                    expanded=False,
+                )
                 st.success(f"Run completato con successo. ID: `{run_id}`")
                 fetch_runs.clear()
             except ValueError as exc:
+                run_status.update(label="❌ Run non avviato", state="error", expanded=False)
                 st.error(str(exc))
             except Exception as exc:
+                run_status.update(label="❌ Run interrotto da un errore", state="error", expanded=False)
                 st.error(f"Errore durante il run: {exc}")
 
 # ===========================================================================
