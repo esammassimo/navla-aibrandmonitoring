@@ -737,6 +737,12 @@ def delete_all_ai_questions(project_id: str) -> int:
         return result.rowcount
 
 
+def delete_ai_question(question_id: str) -> None:
+    """Delete a single question by id."""
+    with get_engine().begin() as conn:
+        conn.execute(text("DELETE FROM ai_questions WHERE id = :id"), {"id": question_id})
+
+
 # ---------------------------------------------------------------------------
 # CRUD — project_brands
 # ---------------------------------------------------------------------------
