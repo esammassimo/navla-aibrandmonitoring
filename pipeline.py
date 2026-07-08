@@ -841,7 +841,8 @@ def _worker(
     run_logger: logging.Logger | None = None,
     keyword: str = "",
     models_by_llm: dict[str, str] | None = None,
-    aio_input: str = "auto",   # "auto" | "keyword" | "question"
+    aio_input: str = "keyword",   # "keyword" | "question" — input per AI Overviews
+    aim_input: str = "question",  # "keyword" | "question" — input per AI Mode
 ) -> str:
     """
     Execute one (question × LLM) unit of work.
@@ -851,23 +852,20 @@ def _worker(
     relay it to UI callbacks from the main thread — Streamlit widgets
     cannot be touched from worker threads.
 
-    aio_input controls what is sent to AI Overviews and AI Mode:
-      "auto"     — keyword if available, else question (default, original behaviour)
-      "keyword"  — always use keyword (falls back to question if keyword is empty)
-      "question" — always use question
+    aio_input: cosa inviare a AI Overviews ("keyword" consigliato, risponde meglio a query brevi)
+    aim_input: cosa inviare a AI Mode ("question" consigliato, è conversazionale)
+    Per entrambi: se "keyword" ma keyword è vuota, cade back sulla question.
     """
     rl = run_logger or logger
     q_short = question[:80]
     _aio_llms = {"aio", "aim"}
 
-    # Build query_text for AIO/AIM based on aio_input setting
-    if _llm_key(llm) in _aio_llms:
-        if aio_input == "question":
-            query_text = question
-        elif aio_input == "keyword":
-            query_text = keyword.strip() if keyword.strip() else question
-        else:  # "auto" — original behaviour
-            query_text = keyword.strip() if keyword.strip() else question
+    # Build query_text based on feature-specific setting
+    llm_k = _llm_key(llm)
+    if llm_k == "aio":
+        query_text = keyword.strip() if (aio_input == "keyword" and keyword.strip()) else question
+    elif llm_k == "aim":
+        query_text = keyword.strip() if (aim_input == "keyword" and keyword.strip()) else question
     else:
         query_text = question
 
@@ -952,7 +950,8 @@ def preview_run(
     models: dict[str, str] | None = None,
     sample_size: int = 5,
     progress_callback: Optional[Callable[[int, int, dict], None]] = None,
-    aio_input: str = "keyword",  # "keyword" | "question"
+    aio_input: str = "keyword",  # "keyword" | "question" — input per AI Overviews
+    aim_input: str = "question", # "keyword" | "question" — input per AI Mode
 ) -> list[dict]:
     """
     Esegue un campione di chiamate (fino a sample_size domande × tutte le
@@ -1013,11 +1012,10 @@ def preview_run(
 
         for llm in llms:
             llm_key = _llm_key(llm)
-            if llm_key in _aio_llms:
-                if aio_input == "question":
-                    query_text = question
-                else:  # "keyword" (default)
-                    query_text = keyword.strip() if keyword.strip() else question
+            if llm_key == "aio":
+                query_text = keyword.strip() if (aio_input == "keyword" and keyword.strip()) else question
+            elif llm_key == "aim":
+                query_text = keyword.strip() if (aim_input == "keyword" and keyword.strip()) else question
             else:
                 query_text = question
             sel_model = models.get(llm)
@@ -1090,7 +1088,8 @@ def start_run(
     collect: str = "both",
     models: dict[str, str] | None = None,
     worker_log_callback: Optional[Callable[[str], None]] = None,
-    aio_input: str = "keyword",  # "keyword" | "question" — what to send to AIO/AIM
+    aio_input: str = "keyword",  # "keyword" | "question" — input per AI Overviews
+    aim_input: str = "question", # "keyword" | "question" — input per AI Mode
 ) -> str:
     """
     Create a run, launch all workers in parallel, wait for completion.
@@ -1237,7 +1236,7 @@ def start_run(
                         _worker,
                         run_id, worker_id, ai_question_id, question,
                         llm, country, language, delay, project_brands_list, collect, run_log, kw,
-                        models, aio_input,
+                        models, aio_input, aim_input,
                     )
                     futures[fut] = worker_id
 

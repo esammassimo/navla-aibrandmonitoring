@@ -322,23 +322,37 @@ else:
 
     # --- Test rapido (preview, nessuna scrittura su DB) -------------------
     if selected_llms:
-        # --- Input per AI Overviews / AI Mode --------------------------------
-        if sel_llms_ai:
-            st.markdown("**Input per AI Overviews / AI Mode**")
-            aio_input = st.radio(
-                "Cosa inviare come query a AI Overviews e AI Mode?",
-                ["keyword", "question"],
-                format_func=lambda x: "Keyword (consigliato)" if x == "keyword" else "Domanda completa",
-                horizontal=True,
-                key="aio_input_mode",
-                help=(
-                    "**Keyword**: invia la keyword associata alla domanda — "
-                    "più efficace per ottenere risultati da AIO/AIM. "
-                    "**Domanda completa**: invia la domanda per esteso."
-                ),
-            )
-        else:
-            aio_input = "keyword"
+        # --- Input per AI Overviews / AI Mode (separati) ---------------------
+        aio_input = "keyword"
+        aim_input = "question"
+        has_aio = "AI Overviews" in sel_llms_ai
+        has_aim = "AI Mode" in sel_llms_ai
+
+        if has_aio or has_aim:
+            st.markdown("**Input per AI Features**")
+            ai_feat_cols = st.columns(2)
+            with ai_feat_cols[0]:
+                if has_aio:
+                    aio_input = st.radio(
+                        "AI Overviews — invia come query:",
+                        ["keyword", "question"],
+                        format_func=lambda x: "Keyword (consigliato)" if x == "keyword" else "Domanda completa",
+                        index=0,
+                        horizontal=False,
+                        key="aio_input_mode",
+                        help="AIO risponde meglio a keyword brevi (es. 'prestito personale').",
+                    )
+            with ai_feat_cols[1]:
+                if has_aim:
+                    aim_input = st.radio(
+                        "AI Mode — invia come query:",
+                        ["question", "keyword"],
+                        format_func=lambda x: "Domanda completa (consigliato)" if x == "question" else "Keyword",
+                        index=0,
+                        horizontal=False,
+                        key="aim_input_mode",
+                        help="AI Mode è conversazionale — risponde meglio a domande complete.",
+                    )
 
         st.divider()
         st.markdown("**Test**")
@@ -409,6 +423,7 @@ else:
                     sample_size=test_sample_size,
                     progress_callback=_test_progress,
                     aio_input=aio_input,
+                    aim_input=aim_input,
                 )
 
                 n_ok = sum(1 for r in test_results if not r["error"])
@@ -490,6 +505,7 @@ else:
                     models=selected_models,
                     worker_log_callback=_worker_log_cb,
                     aio_input=aio_input,
+                    aim_input=aim_input,
                 )
                 progress_bar.progress(1.0, text="Run completato.")
                 run_status.update(
