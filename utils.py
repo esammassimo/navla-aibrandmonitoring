@@ -602,6 +602,52 @@ def delete_keyword(keyword_id: str) -> None:
         conn.execute(text("DELETE FROM keywords WHERE id = :id"), {"id": keyword_id})
 
 
+# ---------------------------------------------------------------------------
+# CRUD — ai_questions
+# ---------------------------------------------------------------------------
+def insert_ai_questions(project_id: str, rows: list[dict]) -> None:
+    """Bulk-insert AI questions."""
+    if not rows:
+        return
+    with get_engine().begin() as conn:
+        for row in rows:
+            conn.execute(
+                text(
+                    "INSERT INTO ai_questions "
+                    "(project_id, keyword_id, question, intent, tone, source, status) "
+                    "VALUES (:pid, :kid, :q, :intent, :tone, :src, :status)"
+                ),
+                {
+                    "pid": project_id,
+                    "kid": row.get("keyword_id"),
+                    "q": row["question"],
+                    "intent": row.get("intent"),
+                    "tone": row.get("tone"),
+                    "src": row.get("source", "manual"),
+                    "status": row.get("status", "active"),
+                },
+            )
+
+
+def update_ai_question_status(question_id: str, status: str) -> None:
+    with get_engine().begin() as conn:
+        conn.execute(
+            text("UPDATE ai_questions SET status = :status WHERE id = :id"),
+            {"status": status, "id": question_id},
+        )
+
+
+def delete_ai_question(question_id: str) -> None:
+    with get_engine().begin() as conn:
+        conn.execute(text("DELETE FROM ai_questions WHERE id = :id"), {"id": question_id})
+
+
+
+
+# ---------------------------------------------------------------------------
+# CRUD — keywords (bulk operations)
+# ---------------------------------------------------------------------------
+
 def update_keyword(keyword_id: str, project_id: str, data: dict) -> None:
     """Update keyword fields. project_id used as safety guard."""
     with get_engine().begin() as conn:
@@ -645,39 +691,8 @@ def delete_all_keywords(project_id: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# CRUD — ai_questions
+# CRUD — ai_questions (bulk operations)
 # ---------------------------------------------------------------------------
-def insert_ai_questions(project_id: str, rows: list[dict]) -> None:
-    """Bulk-insert AI questions."""
-    if not rows:
-        return
-    with get_engine().begin() as conn:
-        for row in rows:
-            conn.execute(
-                text(
-                    "INSERT INTO ai_questions "
-                    "(project_id, keyword_id, question, intent, tone, source, status) "
-                    "VALUES (:pid, :kid, :q, :intent, :tone, :src, :status)"
-                ),
-                {
-                    "pid": project_id,
-                    "kid": row.get("keyword_id"),
-                    "q": row["question"],
-                    "intent": row.get("intent"),
-                    "tone": row.get("tone"),
-                    "src": row.get("source", "manual"),
-                    "status": row.get("status", "active"),
-                },
-            )
-
-
-def update_ai_question_status(question_id: str, status: str) -> None:
-    with get_engine().begin() as conn:
-        conn.execute(
-            text("UPDATE ai_questions SET status = :status WHERE id = :id"),
-            {"status": status, "id": question_id},
-        )
-
 
 def update_ai_question(question_id: str, project_id: str, data: dict) -> None:
     """Full update of an AI question. project_id used as safety guard."""
@@ -735,13 +750,6 @@ def delete_all_ai_questions(project_id: str) -> int:
             {"pid": project_id},
         )
         return result.rowcount
-
-
-def delete_ai_question(question_id: str) -> None:
-    """Delete a single question by id."""
-    with get_engine().begin() as conn:
-        conn.execute(text("DELETE FROM ai_questions WHERE id = :id"), {"id": question_id})
-
 
 # ---------------------------------------------------------------------------
 # CRUD — project_brands
