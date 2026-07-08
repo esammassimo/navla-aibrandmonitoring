@@ -737,16 +737,6 @@ def delete_all_ai_questions(project_id: str) -> int:
         return result.rowcount
 
 
-def delete_all_keywords(project_id: str) -> int:
-    """Delete ALL keywords for a project (cascades to questions). Returns rows deleted."""
-    with get_engine().begin() as conn:
-        result = conn.execute(
-            text("DELETE FROM keywords WHERE project_id = :pid"),
-            {"pid": project_id},
-        )
-        return result.rowcount
-
-
 # ---------------------------------------------------------------------------
 # CRUD — project_brands
 # ---------------------------------------------------------------------------
