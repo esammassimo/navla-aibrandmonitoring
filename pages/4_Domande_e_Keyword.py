@@ -9,7 +9,12 @@ import pandas as pd
 import streamlit as st
 
 from utils import (
+    bulk_delete_ai_questions,
+    bulk_delete_keywords,
+    bulk_update_ai_question_status,
     delete_ai_question,
+    delete_all_ai_questions,
+    delete_all_keywords,
     delete_keyword,
     fetch_ai_questions,
     fetch_clusters,
@@ -21,7 +26,9 @@ from utils import (
     render_sidebar,
     require_login,
     run_query,
+    update_ai_question,
     update_ai_question_status,
+    update_keyword,
 )
 from fanout import generate_fanout_queries
 
@@ -45,21 +52,109 @@ st.subheader("Keywords")
 
 kw_df = fetch_keywords(project_id)
 
+# ─── Inline edit + selezione multipla ────────────────────────────────────────
 if kw_df.empty:
     st.info("No keywords for this project.")
 else:
-    display_kw = kw_df[["keyword", "cluster", "subcluster", "search_volume", "created_at"]].copy()
-    display_kw.columns = ["Keyword", "Cluster", "Sub-cluster", "Volume", "Created at"]
-    st.dataframe(
-        display_kw,
+    # Prepara DataFrame con checkbox selezione e colonne editabili
+    kw_edit_df = kw_df[["id", "keyword", "cluster", "subcluster", "search_volume"]].copy()
+    kw_edit_df.insert(0, "_sel", False)
+    kw_edit_df.columns = ["_sel", "id", "Keyword", "Cluster", "Sub-cluster", "Volume"]
+
+    edited_kw = st.data_editor(
+        kw_edit_df,
         use_container_width=True,
         hide_index=True,
         column_config={
-            "Created at": st.column_config.DatetimeColumn("Created at", format="DD/MM/YYYY"),
-            "Volume": st.column_config.NumberColumn("Volume"),
+            "_sel":        st.column_config.CheckboxColumn("✓", width="small"),
+            "id":          st.column_config.TextColumn("ID", disabled=True, width="small"),
+            "Keyword":     st.column_config.TextColumn("Keyword", width="large"),
+            "Cluster":     st.column_config.TextColumn("Cluster"),
+            "Sub-cluster": st.column_config.TextColumn("Sub-cluster"),
+            "Volume":      st.column_config.NumberColumn("Volume", min_value=0),
         },
+        key="kw_editor",
     )
-    st.caption(f"Total: **{len(kw_df)}** keywords")
+    st.caption(f"Total: **{len(kw_df)}** keywords · Seleziona righe con ✓ per azioni bulk")
+
+    if is_admin:
+        sel_kw_ids = edited_kw[edited_kw["_sel"] == True]["id"].astype(str).tolist()
+        n_sel_kw = len(sel_kw_ids)
+
+        col_save_kw, col_del_sel_kw, col_del_all_kw = st.columns([2, 2, 2])
+
+        # --- Salva modifiche inline ---
+        with col_save_kw:
+            if st.button("💾 Salva modifiche keyword", use_container_width=True):
+                saved = 0
+                for _, row in edited_kw.iterrows():
+                    orig = kw_df[kw_df["id"].astype(str) == str(row["id"])]
+                    if orig.empty:
+                        continue
+                    o = orig.iloc[0]
+                    changed = (
+                        str(row["Keyword"]) != str(o.get("keyword", ""))
+                        or str(row["Cluster"]) != str(o.get("cluster", "") or "")
+                        or str(row["Sub-cluster"]) != str(o.get("subcluster", "") or "")
+                        or str(row["Volume"]) != str(o.get("search_volume", "") or "")
+                    )
+                    if changed:
+                        update_keyword(str(row["id"]), project_id, {
+                            "keyword":       str(row["Keyword"]).strip(),
+                            "cluster":       str(row["Cluster"]).strip() if row["Cluster"] else None,
+                            "subcluster":    str(row["Sub-cluster"]).strip() if row["Sub-cluster"] else None,
+                            "search_volume": row["Volume"],
+                        })
+                        saved += 1
+                if saved:
+                    fetch_keywords.clear()
+                    st.success(f"✅ {saved} keyword aggiornate.")
+                    st.rerun()
+                else:
+                    st.info("Nessuna modifica rilevata.")
+
+        # --- Elimina selezionate ---
+        with col_del_sel_kw:
+            if n_sel_kw == 0:
+                st.button(f"🗑 Elimina selezionate (0)", disabled=True, use_container_width=True)
+            else:
+                if st.button(f"🗑 Elimina selezionate ({n_sel_kw})", use_container_width=True):
+                    st.session_state["confirm_del_sel_kw"] = True
+                if st.session_state.get("confirm_del_sel_kw"):
+                    st.warning(f"Confermi l'eliminazione di **{n_sel_kw}** keyword (e le domande associate) in questo progetto?")
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        if st.button("Sì, elimina", key="conf_del_sel_kw", type="primary"):
+                            n = bulk_delete_keywords(sel_kw_ids, project_id)
+                            fetch_keywords.clear()
+                            fetch_ai_questions.clear()
+                            st.session_state.pop("confirm_del_sel_kw", None)
+                            st.success(f"✅ {n} keyword eliminate.")
+                            st.rerun()
+                    with c2:
+                        if st.button("Annulla", key="cancel_del_sel_kw"):
+                            st.session_state.pop("confirm_del_sel_kw", None)
+                            st.rerun()
+
+        # --- Elimina tutto ---
+        with col_del_all_kw:
+            if st.button("🗑 Elimina TUTTE le keyword", use_container_width=True):
+                st.session_state["confirm_del_all_kw"] = True
+            if st.session_state.get("confirm_del_all_kw"):
+                st.error(f"Elimini **tutte** le keyword e domande di questo progetto? Azione irreversibile.")
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.button("Sì, elimina tutto", key="conf_del_all_kw", type="primary"):
+                        n = delete_all_keywords(project_id)
+                        fetch_keywords.clear()
+                        fetch_ai_questions.clear()
+                        st.session_state.pop("confirm_del_all_kw", None)
+                        st.success(f"✅ {n} keyword (e relative domande) eliminate.")
+                        st.rerun()
+                with c2:
+                    if st.button("Annulla", key="cancel_del_all_kw"):
+                        st.session_state.pop("confirm_del_all_kw", None)
+                        st.rerun()
 
 if is_admin:
     # --- Add single keyword ---
@@ -126,34 +221,6 @@ if is_admin:
             except Exception as exc:
                 st.error(f"Error parsing file: {exc}")
 
-    # --- Delete keyword ---
-    if not kw_df.empty:
-        with st.expander("🗑 Delete keyword"):
-            st.warning("Deleting a keyword also removes all associated questions.")
-            kw_opts = {f"{r['keyword']} ({r.get('cluster') or '—'})": str(r["id"])
-                       for _, r in kw_df.iterrows()}
-            kw_to_del = st.selectbox("Keyword", list(kw_opts.keys()), key="del_kw_select")
-            kw_del_id = kw_opts[kw_to_del]
-            del_key_kw = f"confirm_del_kw_{kw_del_id}"
-            if not st.session_state.get(del_key_kw):
-                if st.button("Elimina", key=f"delbtn_kw_{kw_del_id}"):
-                    st.session_state[del_key_kw] = True
-                    st.rerun()
-            else:
-                st.error("Are you sure? This action cannot be undone.")
-                c1, c2 = st.columns(2)
-                with c1:
-                    if st.button("Yes, delete", key=f"delconf_kw_{kw_del_id}", type="primary"):
-                        delete_keyword(kw_del_id)
-                        fetch_keywords.clear()
-                        fetch_ai_questions.clear()
-                        st.session_state.pop(del_key_kw, None)
-                        st.rerun()
-                with c2:
-                    if st.button("Cancel", key=f"delcancel_kw_{kw_del_id}"):
-                        st.session_state.pop(del_key_kw, None)
-                        st.rerun()
-
 # ===========================================================================
 # SECTION 2 — AI Questions
 # ===========================================================================
@@ -161,13 +228,15 @@ st.divider()
 st.subheader("AI Questions")
 
 # Filters
-col_f1, col_f2 = st.columns([2, 1])
+col_f1, col_f2, col_f3 = st.columns([2, 1, 2])
 with col_f1:
     clusters_df = fetch_clusters(project_id)
     cluster_opts = ["All"] + list(clusters_df["cluster"]) if not clusters_df.empty else ["All"]
     filter_cluster = st.selectbox("Filter by cluster", cluster_opts, key="q_filter_cluster")
 with col_f2:
     filter_status = st.selectbox("Status", ["All", "active", "draft"], key="q_filter_status")
+with col_f3:
+    filter_search = st.text_input("🔍 Cerca nel testo", placeholder="parola chiave...", key="q_filter_search")
 
 q_df = fetch_ai_questions(project_id)
 
@@ -190,25 +259,140 @@ if not q_df.empty:
         filtered = filtered[filtered["cluster_text"] == filter_cluster]
     if filter_status != "All":
         filtered = filtered[filtered["status"] == filter_status]
+    if filter_search.strip():
+        filtered = filtered[filtered["question"].str.contains(filter_search.strip(), case=False, na=False)]
+
+    active_count = int((q_df["status"] == "active").sum())
+    draft_count  = int((q_df["status"] == "draft").sum())
+    st.caption(
+        f"Total: **{len(q_df)}** &nbsp;|&nbsp; "
+        f"Active: **{active_count}** &nbsp;|&nbsp; "
+        f"Draft: **{draft_count}** &nbsp;|&nbsp; "
+        f"Filtrate: **{len(filtered)}**"
+    )
 
     if filtered.empty:
         st.info("No questions match the selected filters.")
     else:
-        display_q = filtered[["question", "keyword_text", "cluster_text", "intent", "tone", "source", "status", "created_at"]].copy()
-        display_q.columns = ["Question", "Keyword", "Cluster", "Intent", "Tone", "Fonte", "Status", "Creata il"]
-        st.dataframe(
-            display_q,
+        # Build editable df with checkbox
+        q_edit_df = filtered[["id", "question", "intent", "tone", "status", "keyword_text", "cluster_text"]].copy()
+        q_edit_df.insert(0, "_sel", False)
+        q_edit_df.columns = ["_sel", "id", "Domanda", "Intent", "Tone", "Status", "Keyword", "Cluster"]
+
+        # Status options
+        STATUS_OPTS = ["active", "draft"]
+        INTENT_OPTS = ["", "Informational", "Commercial", "Navigational", "Transactional"]
+        TONE_OPTS   = ["", "Positivo", "Negativo", "Neutro", "Misto"]
+
+        edited_q = st.data_editor(
+            q_edit_df,
             use_container_width=True,
             hide_index=True,
             column_config={
-                "Created at": st.column_config.DatetimeColumn("Created at", format="DD/MM/YYYY"),
-                "Status": st.column_config.TextColumn("Status"),
-                "Question": st.column_config.TextColumn("Question", width="large"),
+                "_sel":    st.column_config.CheckboxColumn("✓", width="small"),
+                "id":      st.column_config.TextColumn("ID", disabled=True, width="small"),
+                "Domanda": st.column_config.TextColumn("Domanda", width="large"),
+                "Intent":  st.column_config.SelectboxColumn("Intent", options=INTENT_OPTS),
+                "Tone":    st.column_config.SelectboxColumn("Tone", options=TONE_OPTS),
+                "Status":  st.column_config.SelectboxColumn("Status", options=STATUS_OPTS),
+                "Keyword": st.column_config.TextColumn("Keyword", disabled=True, width="medium"),
+                "Cluster": st.column_config.TextColumn("Cluster", disabled=True, width="small"),
             },
+            key="q_editor",
         )
-        active_count = int((q_df["status"] == "active").sum())
-        draft_count = int((q_df["status"] == "draft").sum())
-        st.caption(f"Total: **{len(q_df)}** questions &nbsp;|&nbsp; Active: **{active_count}** &nbsp;|&nbsp; Draft: **{draft_count}**")
+        st.caption("Modifica Domanda, Intent, Tone e Status direttamente nella tabella. Keyword e Cluster non sono editabili qui (gestiscili dalla sezione Keyword).")
+
+        if is_admin:
+            sel_q_ids = edited_q[edited_q["_sel"] == True]["id"].astype(str).tolist()
+            n_sel_q = len(sel_q_ids)
+
+            col_save_q, col_act_sel, col_draft_sel, col_del_sel_q, col_del_all_q = st.columns(5)
+
+            # --- Salva modifiche inline ---
+            with col_save_q:
+                if st.button("💾 Salva modifiche", use_container_width=True):
+                    saved_q = 0
+                    for _, row in edited_q.iterrows():
+                        orig = q_df[q_df["id"].astype(str) == str(row["id"])]
+                        if orig.empty:
+                            continue
+                        o = orig.iloc[0]
+                        changed = (
+                            str(row["Domanda"]) != str(o.get("question", ""))
+                            or str(row["Intent"] or "") != str(o.get("intent", "") or "")
+                            or str(row["Tone"] or "")   != str(o.get("tone", "") or "")
+                            or str(row["Status"])        != str(o.get("status", ""))
+                        )
+                        if changed:
+                            update_ai_question(str(row["id"]), project_id, {
+                                "question":   str(row["Domanda"]).strip(),
+                                "intent":     str(row["Intent"]).strip() if row["Intent"] else None,
+                                "tone":       str(row["Tone"]).strip() if row["Tone"] else None,
+                                "status":     str(row["Status"]),
+                                "keyword_id": str(o.get("keyword_id")) if o.get("keyword_id") else None,
+                            })
+                            saved_q += 1
+                    if saved_q:
+                        fetch_ai_questions.clear()
+                        st.success(f"✅ {saved_q} domande aggiornate.")
+                        st.rerun()
+                    else:
+                        st.info("Nessuna modifica rilevata.")
+
+            # --- Attiva selezionate ---
+            with col_act_sel:
+                if st.button(f"✅ Attiva ({n_sel_q})", disabled=n_sel_q == 0, use_container_width=True):
+                    n = bulk_update_ai_question_status(sel_q_ids, project_id, "active")
+                    fetch_ai_questions.clear()
+                    st.success(f"✅ {n} domande attivate.")
+                    st.rerun()
+
+            # --- Metti in draft selezionate ---
+            with col_draft_sel:
+                if st.button(f"⏸ Draft ({n_sel_q})", disabled=n_sel_q == 0, use_container_width=True):
+                    n = bulk_update_ai_question_status(sel_q_ids, project_id, "draft")
+                    fetch_ai_questions.clear()
+                    st.success(f"✅ {n} domande impostate come draft.")
+                    st.rerun()
+
+            # --- Elimina selezionate ---
+            with col_del_sel_q:
+                if st.button(f"🗑 Elimina ({n_sel_q})", disabled=n_sel_q == 0, use_container_width=True):
+                    st.session_state["confirm_del_sel_q"] = True
+                if st.session_state.get("confirm_del_sel_q"):
+                    st.warning(f"Confermi l'eliminazione di **{n_sel_q}** domande in questo progetto?")
+                    d1, d2 = st.columns(2)
+                    with d1:
+                        if st.button("Sì, elimina", key="conf_del_sel_q", type="primary"):
+                            n = bulk_delete_ai_questions(sel_q_ids, project_id)
+                            fetch_ai_questions.clear()
+                            st.session_state.pop("confirm_del_sel_q", None)
+                            st.success(f"✅ {n} domande eliminate.")
+                            st.rerun()
+                    with d2:
+                        if st.button("Annulla", key="cancel_del_sel_q"):
+                            st.session_state.pop("confirm_del_sel_q", None)
+                            st.rerun()
+
+            # --- Elimina TUTTE le domande ---
+            with col_del_all_q:
+                if st.button("🗑 Elimina TUTTE", use_container_width=True):
+                    st.session_state["confirm_del_all_q"] = True
+                if st.session_state.get("confirm_del_all_q"):
+                    st.error("Elimini **tutte** le domande di questo progetto? Azione irreversibile.")
+                    d1, d2 = st.columns(2)
+                    with d1:
+                        if st.button("Sì, elimina tutto", key="conf_del_all_q", type="primary"):
+                            n = delete_all_ai_questions(project_id)
+                            fetch_ai_questions.clear()
+                            st.session_state.pop("confirm_del_all_q", None)
+                            st.success(f"✅ {n} domande eliminate.")
+                            st.rerun()
+                    with d2:
+                        if st.button("Annulla", key="cancel_del_all_q"):
+                            st.session_state.pop("confirm_del_all_q", None)
+                            st.rerun()
+
 else:
     st.info("No questions for this project.")
 
@@ -433,77 +617,6 @@ if is_admin:
                     st.session_state.pop("fanout_edited_preview", None)
                     st.success(f"✅ {len(rows_to_insert)} questions saved as **draft**.")
                     st.rerun()
-
-    # --- Bulk status change ---
-    st.divider()
-    st.subheader("Question status management")
-
-    if not q_df.empty:
-        col_bulk1, col_bulk2 = st.columns(2)
-
-        with col_bulk1:
-            st.write("**Change status of a single question**")
-            # Show condensed question text (first 80 chars)
-            q_opts = {
-                f"{str(r['question'])[:80]}{'…' if len(str(r['question'])) > 80 else ''} [{r['status']}]": str(r["id"])
-                for _, r in q_df.iterrows()
-            }
-            q_sel_label = st.selectbox("Question", list(q_opts.keys()), key="status_q_select")
-            q_sel_id = q_opts[q_sel_label]
-            new_status = st.selectbox("New status", ["active", "draft"], key="new_status_sel")
-            if st.button("Apply", key="btn_status_change"):
-                update_ai_question_status(q_sel_id, new_status)
-                fetch_ai_questions.clear()
-                st.success("Status updated.")
-                st.rerun()
-
-        with col_bulk2:
-            st.write("**Activate / deactivate all**")
-            c_act, c_draft = st.columns(2)
-            with c_act:
-                if st.button("✅ Activate all", use_container_width=True):
-                    for qid in q_df["id"].astype(str):
-                        update_ai_question_status(qid, "active")
-                    fetch_ai_questions.clear()
-                    st.success("All questions activated.")
-                    st.rerun()
-            with c_draft:
-                if st.button("⏸ Draft all", use_container_width=True):
-                    for qid in q_df["id"].astype(str):
-                        update_ai_question_status(qid, "draft")
-                    fetch_ai_questions.clear()
-                    st.success("All questions set to draft.")
-                    st.rerun()
-
-    # --- Delete question ---
-    if not q_df.empty:
-        with st.expander("🗑 Delete question"):
-            del_q_opts = {
-                f"{str(r['question'])[:80]}{'…' if len(str(r['question'])) > 80 else ''}": str(r["id"])
-                for _, r in q_df.iterrows()
-            }
-            q_to_del_label = st.selectbox("Question", list(del_q_opts.keys()), key="del_q_select")
-            q_to_del_id = del_q_opts[q_to_del_label]
-            del_key_q = f"confirm_del_q_{q_to_del_id}"
-
-            st.warning("Deleting the question will also remove all associated responses and citations.")
-            if not st.session_state.get(del_key_q):
-                if st.button("Elimina", key=f"delbtn_q_{q_to_del_id}"):
-                    st.session_state[del_key_q] = True
-                    st.rerun()
-            else:
-                st.error("Are you sure? This action cannot be undone.")
-                d1, d2 = st.columns(2)
-                with d1:
-                    if st.button("Yes, delete", key=f"delconf_q_{q_to_del_id}", type="primary"):
-                        delete_ai_question(q_to_del_id)
-                        fetch_ai_questions.clear()
-                        st.session_state.pop(del_key_q, None)
-                        st.rerun()
-                with d2:
-                    if st.button("Cancel", key=f"delcancel_q_{q_to_del_id}"):
-                        st.session_state.pop(del_key_q, None)
-                        st.rerun()
 
 # ===========================================================================
 # SECTION 3 — Export (all roles)

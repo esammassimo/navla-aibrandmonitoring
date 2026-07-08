@@ -602,6 +602,48 @@ def delete_keyword(keyword_id: str) -> None:
         conn.execute(text("DELETE FROM keywords WHERE id = :id"), {"id": keyword_id})
 
 
+def update_keyword(keyword_id: str, project_id: str, data: dict) -> None:
+    """Update keyword fields. project_id used as safety guard."""
+    with get_engine().begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE keywords SET keyword = :kw, cluster = :cl, "
+                "subcluster = :sub, search_volume = :vol "
+                "WHERE id = :id AND project_id = :pid"
+            ),
+            {
+                "kw": data.get("keyword"),
+                "cl": data.get("cluster") or None,
+                "sub": data.get("subcluster") or None,
+                "vol": int(data["search_volume"]) if data.get("search_volume") not in (None, "", "nan") else None,
+                "id": keyword_id,
+                "pid": project_id,
+            },
+        )
+
+
+def bulk_delete_keywords(keyword_ids: list[str], project_id: str) -> int:
+    """Delete multiple keywords by id, scoped to project_id. Returns rows deleted."""
+    if not keyword_ids:
+        return 0
+    with get_engine().begin() as conn:
+        result = conn.execute(
+            text("DELETE FROM keywords WHERE id = ANY(:ids) AND project_id = :pid"),
+            {"ids": keyword_ids, "pid": project_id},
+        )
+        return result.rowcount
+
+
+def delete_all_keywords(project_id: str) -> int:
+    """Delete ALL keywords for a project. Returns rows deleted."""
+    with get_engine().begin() as conn:
+        result = conn.execute(
+            text("DELETE FROM keywords WHERE project_id = :pid"),
+            {"pid": project_id},
+        )
+        return result.rowcount
+
+
 # ---------------------------------------------------------------------------
 # CRUD — ai_questions
 # ---------------------------------------------------------------------------
@@ -637,9 +679,72 @@ def update_ai_question_status(question_id: str, status: str) -> None:
         )
 
 
-def delete_ai_question(question_id: str) -> None:
+def update_ai_question(question_id: str, project_id: str, data: dict) -> None:
+    """Full update of an AI question. project_id used as safety guard."""
     with get_engine().begin() as conn:
-        conn.execute(text("DELETE FROM ai_questions WHERE id = :id"), {"id": question_id})
+        conn.execute(
+            text(
+                "UPDATE ai_questions SET question = :q, intent = :intent, "
+                "tone = :tone, status = :status, keyword_id = :kid "
+                "WHERE id = :id AND project_id = :pid"
+            ),
+            {
+                "q": data.get("question"),
+                "intent": data.get("intent") or None,
+                "tone": data.get("tone") or None,
+                "status": data.get("status", "active"),
+                "kid": data.get("keyword_id") or None,
+                "id": question_id,
+                "pid": project_id,
+            },
+        )
+
+
+def bulk_delete_ai_questions(question_ids: list[str], project_id: str) -> int:
+    """Delete multiple questions by id, scoped to project_id. Returns rows deleted."""
+    if not question_ids:
+        return 0
+    with get_engine().begin() as conn:
+        result = conn.execute(
+            text("DELETE FROM ai_questions WHERE id = ANY(:ids) AND project_id = :pid"),
+            {"ids": question_ids, "pid": project_id},
+        )
+        return result.rowcount
+
+
+def bulk_update_ai_question_status(question_ids: list[str], project_id: str, status: str) -> int:
+    """Change status for multiple questions, scoped to project_id. Returns rows updated."""
+    if not question_ids:
+        return 0
+    with get_engine().begin() as conn:
+        result = conn.execute(
+            text(
+                "UPDATE ai_questions SET status = :status "
+                "WHERE id = ANY(:ids) AND project_id = :pid"
+            ),
+            {"status": status, "ids": question_ids, "pid": project_id},
+        )
+        return result.rowcount
+
+
+def delete_all_ai_questions(project_id: str) -> int:
+    """Delete ALL questions for a project. Returns rows deleted."""
+    with get_engine().begin() as conn:
+        result = conn.execute(
+            text("DELETE FROM ai_questions WHERE project_id = :pid"),
+            {"pid": project_id},
+        )
+        return result.rowcount
+
+
+def delete_all_keywords(project_id: str) -> int:
+    """Delete ALL keywords for a project (cascades to questions). Returns rows deleted."""
+    with get_engine().begin() as conn:
+        result = conn.execute(
+            text("DELETE FROM keywords WHERE project_id = :pid"),
+            {"pid": project_id},
+        )
+        return result.rowcount
 
 
 # ---------------------------------------------------------------------------
