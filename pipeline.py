@@ -112,10 +112,11 @@ GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash"]
 # se l'utente non sceglie nulla di diverso).
 # ---------------------------------------------------------------------------
 AVAILABLE_MODELS: dict[str, list[str]] = {
-    # gpt-4o non è più sul listino prezzi ufficiale OpenAI (sostituito dalla
-    # famiglia 5.4/5.5) — gpt-5.4 è il nuovo default: stesso ruolo "workhorse
-    # di produzione" a $2.50/$15 per M token, contro $5/$30 di gpt-5.5.
-    "ChatGPT": ["gpt-5.4", "gpt-5.4-mini", "gpt-5.5", "gpt-4o-mini"],
+    # gpt-5.4/5.5 testati il 29/06/2026: ritornano 403 Forbidden con la
+    # chiave API in uso (modello non accessibile su questa org OpenAI).
+    # Tornato a gpt-4o come default, confermato funzionante. gpt-5.4/5.5
+    # restano selezionabili manualmente per chi ha accesso abilitato.
+    "ChatGPT": ["gpt-4o", "gpt-4o-mini", "gpt-5.4", "gpt-5.5"],
     # claude-sonnet-4-6 resta il default: a $3/$15 per M token è il punto di
     # equilibrio qualità/costo per task ripetitivi di question-answering con
     # web search. Opus 4.8 ($5/$25, +67%) non aggiunge valore per questo
@@ -207,7 +208,7 @@ def _extract_urls_from_text(text: str) -> list[str]:
 # Each returns (response_text, sources, model_name)
 # ===========================================================================
 
-def _call_chatgpt(question: str, country: str, model: str = "gpt-5.4") -> tuple[str, list[str], str]:
+def _call_chatgpt(question: str, country: str, model: str = "gpt-4o") -> tuple[str, list[str], str]:
     key = _secrets().get("api_keys", {}).get("openai", "")
     if not key:
         return "DISABLED", [], ""
@@ -430,24 +431,47 @@ def _call_perplexity(question: str, model: str = "sonar-pro") -> tuple[str, list
 
 
 def _call_aio(question: str, country: str, language: str) -> tuple[Optional[str], list[str], str]:
+    """
+    Chiama Google AI Overview via SerpApi (engine=google).
+    Se Google richiede una seconda richiesta (page_token), la esegue
+    immediatamente con engine=google_ai_overview.
+    Restituisce (response_text, sources, model_name).
+    response_text è None se non c'è AI Overview per la query.
+    """
     key = _secrets().get("api_keys", {}).get("serpapi", "")
     if not key:
         return "DISABLED", [], "google_aio"
 
-    try:
-        from serpapi import GoogleSearch
-    except ImportError:
-        return "ERROR: google-search-results package not installed", [], "google_aio"
+    def _parse_text_blocks(blocks: list) -> str:
+        """Stesso parsing usato per AI Mode: estrae snippet da text_blocks annidati."""
+        parts: list[str] = []
+        for block in blocks:
+            snippet = block.get("snippet", "").strip()
+            if snippet:
+                parts.append(snippet)
+            for item in block.get("list", []):
+                item_text = item.get("snippet", "").strip()
+                if item_text:
+                    parts.append(item_text)
+        return "\n".join(parts).strip()
 
     try:
-        results = GoogleSearch({
-            "engine": "google",
-            "q": question,
-            "api_key": key,
-            "hl": language,
-            "gl": country,
-            "no_cache": False,
-        }).get_dict()
+        resp = requests.get(
+            "https://serpapi.com/search",
+            params={
+                "engine": "google",
+                "q": question,
+                "api_key": key,
+                "hl": language,
+                "gl": country,
+                # no_cache=True: una risposta cache può contenere un
+                # page_token già scaduto (validità ~1-4 minuti).
+                "no_cache": "true",
+            },
+            timeout=60,
+        )
+        resp.raise_for_status()
+        results = resp.json()
 
         logger.info("AIO SerpApi response keys: %s", list(results.keys()))
         aio = results.get("ai_overview")
@@ -455,20 +479,47 @@ def _call_aio(question: str, country: str, language: str) -> tuple[Optional[str]
             logger.info("AIO: no ai_overview for question: %s", question[:80])
             return None, [], "google_aio"
 
-        # Text: prefer top-level "text", fall back to joining reference snippets
-        text_out = aio.get("text") or ""
+        # --- Caso 1: Google ha richiesto una seconda chiamata ---
+        page_token = aio.get("page_token")
+        if page_token:
+            aio_resp = requests.get(
+                "https://serpapi.com/search",
+                params={
+                    "engine": "google_ai_overview",
+                    "page_token": page_token,
+                    "api_key": key,
+                    "no_cache": "true",
+                },
+                timeout=60,
+            )
+            aio_resp.raise_for_status()
+            aio_data = aio_resp.json()
+            aio = aio_data.get("ai_overview", aio_data)  # alcuni payload sono già "flat"
+
+        # --- Estrazione testo da text_blocks (annidati, come in AI Mode) ---
+        text_blocks = aio.get("text_blocks", [])
+        text_out = _parse_text_blocks(text_blocks)
+
+        # Fallback: campo "text" diretto, se presente in qualche variante di risposta
+        if not text_out:
+            text_out = (aio.get("text") or "").strip()
+
+        # Ultimo fallback: snippet dalle references
         if not text_out:
             references = aio.get("references", [])
             text_out = "\n".join(
                 ref.get("snippet", "") for ref in references if ref.get("snippet")
             ).strip()
 
-        # Sources: from references[].link
+        # Sources: da references[].link
         sources = [
             ref["link"]
             for ref in aio.get("references", [])
             if ref.get("link")
         ]
+
+        if not text_out:
+            logger.info("AIO: ai_overview presente ma nessun testo estraibile per: %s", question[:80])
 
         return text_out or None, sources, "google_aio"
 
@@ -790,6 +841,7 @@ def _worker(
     run_logger: logging.Logger | None = None,
     keyword: str = "",
     models_by_llm: dict[str, str] | None = None,
+    aio_input: str = "auto",   # "auto" | "keyword" | "question"
 ) -> str:
     """
     Execute one (question × LLM) unit of work.
@@ -798,12 +850,27 @@ def _worker(
     This is returned (not pushed via callback) so the caller can safely
     relay it to UI callbacks from the main thread — Streamlit widgets
     cannot be touched from worker threads.
+
+    aio_input controls what is sent to AI Overviews and AI Mode:
+      "auto"     — keyword if available, else question (default, original behaviour)
+      "keyword"  — always use keyword (falls back to question if keyword is empty)
+      "question" — always use question
     """
     rl = run_logger or logger
     q_short = question[:80]
-    # AIO and AI Mode use the keyword as query; conversational LLMs use the full question
     _aio_llms = {"aio", "aim"}
-    query_text = keyword.strip() if keyword.strip() and _llm_key(llm) in _aio_llms else question
+
+    # Build query_text for AIO/AIM based on aio_input setting
+    if _llm_key(llm) in _aio_llms:
+        if aio_input == "question":
+            query_text = question
+        elif aio_input == "keyword":
+            query_text = keyword.strip() if keyword.strip() else question
+        else:  # "auto" — original behaviour
+            query_text = keyword.strip() if keyword.strip() else question
+    else:
+        query_text = question
+
     models_by_llm = models_by_llm or {}
     summary_line = ""
 
@@ -815,7 +882,7 @@ def _worker(
         llm_key = _llm_key(llm)
         sel_model = models_by_llm.get(llm)  # display name key, e.g. "ChatGPT"
         if llm_key == "chatgpt":
-            response_text, sources, model_name = _call_chatgpt(question, country, model=sel_model or "gpt-5.4")
+            response_text, sources, model_name = _call_chatgpt(question, country, model=sel_model or "gpt-4o")
         elif llm_key == "claude":
             response_text, sources, model_name = _call_claude(question, model=sel_model or "claude-sonnet-4-6")
         elif llm_key == "gemini":
@@ -885,6 +952,7 @@ def preview_run(
     models: dict[str, str] | None = None,
     sample_size: int = 5,
     progress_callback: Optional[Callable[[int, int, dict], None]] = None,
+    aio_input: str = "keyword",  # "keyword" | "question"
 ) -> list[dict]:
     """
     Esegue un campione di chiamate (fino a sample_size domande × tutte le
@@ -945,13 +1013,19 @@ def preview_run(
 
         for llm in llms:
             llm_key = _llm_key(llm)
-            query_text = keyword.strip() if keyword.strip() and llm_key in _aio_llms else question
+            if llm_key in _aio_llms:
+                if aio_input == "question":
+                    query_text = question
+                else:  # "keyword" (default)
+                    query_text = keyword.strip() if keyword.strip() else question
+            else:
+                query_text = question
             sel_model = models.get(llm)
             t0 = time.time()
 
             try:
                 if llm_key == "chatgpt":
-                    response_text, sources, model_name = _call_chatgpt(question, country, model=sel_model or "gpt-5.4")
+                    response_text, sources, model_name = _call_chatgpt(question, country, model=sel_model or "gpt-4o")
                 elif llm_key == "claude":
                     response_text, sources, model_name = _call_claude(question, model=sel_model or "claude-sonnet-4-6")
                 elif llm_key == "gemini":
@@ -1016,6 +1090,7 @@ def start_run(
     collect: str = "both",
     models: dict[str, str] | None = None,
     worker_log_callback: Optional[Callable[[str], None]] = None,
+    aio_input: str = "keyword",  # "keyword" | "question" — what to send to AIO/AIM
 ) -> str:
     """
     Create a run, launch all workers in parallel, wait for completion.
@@ -1162,7 +1237,7 @@ def start_run(
                         _worker,
                         run_id, worker_id, ai_question_id, question,
                         llm, country, language, delay, project_brands_list, collect, run_log, kw,
-                        models,
+                        models, aio_input,
                     )
                     futures[fut] = worker_id
 

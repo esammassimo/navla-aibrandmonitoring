@@ -322,6 +322,24 @@ else:
 
     # --- Test rapido (preview, nessuna scrittura su DB) -------------------
     if selected_llms:
+        # --- Input per AI Overviews / AI Mode --------------------------------
+        if sel_llms_ai:
+            st.markdown("**Input per AI Overviews / AI Mode**")
+            aio_input = st.radio(
+                "Cosa inviare come query a AI Overviews e AI Mode?",
+                ["keyword", "question"],
+                format_func=lambda x: "Keyword (consigliato)" if x == "keyword" else "Domanda completa",
+                horizontal=True,
+                key="aio_input_mode",
+                help=(
+                    "**Keyword**: invia la keyword associata alla domanda — "
+                    "più efficace per ottenere risultati da AIO/AIM. "
+                    "**Domanda completa**: invia la domanda per esteso."
+                ),
+            )
+        else:
+            aio_input = "keyword"
+
         st.divider()
         st.markdown("**Test**")
         st.caption(
@@ -390,6 +408,7 @@ else:
                     models=selected_models,
                     sample_size=test_sample_size,
                     progress_callback=_test_progress,
+                    aio_input=aio_input,
                 )
 
                 n_ok = sum(1 for r in test_results if not r["error"])
@@ -470,6 +489,7 @@ else:
                     collect="both",
                     models=selected_models,
                     worker_log_callback=_worker_log_cb,
+                    aio_input=aio_input,
                 )
                 progress_bar.progress(1.0, text="Run completato.")
                 run_status.update(
