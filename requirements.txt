@@ -1,12 +1,18 @@
-# Vincoli con tetto sul major/minor dove un aggiornamento può cambiare
-# comportamento a runtime. SQLAlchemy 2.1 ha spostato il driver di default per
-# gli URL "postgresql://" da psycopg2 a psycopg v3: senza tetto, una minor
-# release può rompere l'app senza che sia stata toccata una riga di codice.
+# Vincoli con tetto dove un aggiornamento può cambiare comportamento a runtime.
+# SQLAlchemy 2.1 ha spostato il driver di default per gli URL "postgresql://"
+# da psycopg2 a psycopg v3: senza tetto, una minor release rompe l'app senza
+# che sia stata toccata una riga di codice.
+#
+# ATTENZIONE ai minimi: l'ambiente di Streamlit Cloud è su Python 3.14, dove
+# diverse versioni precedenti di queste librerie non partono proprio. In
+# particolare altair 5.5.0 importa TypedDict da `typing` assumendo che la
+# PEP 728 fosse in 3.14 (non lo è) e va in TypeError all'import. Il minimo su
+# altair è quindi 6.0, non 5.x. Streamlit accetta altair >=5,<7.
 streamlit>=1.32.0,<2.0
 sqlalchemy>=2.1,<2.2
 psycopg[binary]>=3.2,<4.0
 pandas>=2.0,<3.0
-altair>=5.0,<6.0
+altair>=6.0,<7.0
 requests>=2.31,<3.0
 extra-streamlit-components>=0.1.60
 openpyxl>=3.1
