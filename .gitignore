@@ -28,3 +28,4 @@ Thumbs.db
 logs/
 *.log
 
+fix_canonical_agos.sql
