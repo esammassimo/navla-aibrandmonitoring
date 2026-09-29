@@ -427,17 +427,22 @@ def _import_from_excel(project_id: str, uploaded_file) -> dict:
             ] if not s_group.empty else pd.DataFrame()
 
             if not s_match.empty:
-                with get_engine().begin() as conn:
-                    for _, sr in s_match.iterrows():
-                        url = str(sr.get("URL", "")).strip()
-                        if not url:
-                            continue
+                src_params = [
+                    {"rid": response_id, "url": url}
+                    for url in (
+                        str(sr.get("URL", "")).strip() for _, sr in s_match.iterrows()
+                    )
+                    if url
+                ]
+                if src_params:
+                    # executemany: un round-trip per risposta invece di uno per URL.
+                    with get_engine().begin() as conn:
                         conn.execute(
                             text("INSERT INTO source_mentions (ai_response_id, url) "
                                  "VALUES (:rid, :url)"),
-                            {"rid": response_id, "url": url},
+                            src_params,
                         )
-                        summary["sources"] += 1
+                    summary["sources"] += len(src_params)
 
     return summary
 

@@ -1,9 +1,13 @@
-streamlit>=1.32.0
-sqlalchemy>=2.0
-psycopg[binary]>=3.2
-pandas>=2.0
-altair>=5.0
-requests>=2.31
+# Vincoli con tetto sul major/minor dove un aggiornamento può cambiare
+# comportamento a runtime. SQLAlchemy 2.1 ha spostato il driver di default per
+# gli URL "postgresql://" da psycopg2 a psycopg v3: senza tetto, una minor
+# release può rompere l'app senza che sia stata toccata una riga di codice.
+streamlit>=1.32.0,<2.0
+sqlalchemy>=2.1,<2.2
+psycopg[binary]>=3.2,<4.0
+pandas>=2.0,<3.0
+altair>=5.0,<6.0
+requests>=2.31,<3.0
 extra-streamlit-components>=0.1.60
 openpyxl>=3.1
 google-search-results>=2.4

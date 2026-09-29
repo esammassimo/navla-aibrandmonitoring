@@ -760,26 +760,30 @@ def _db_insert_response(
 def _db_insert_sources(response_id: str, urls: list[str]) -> None:
     if not urls:
         return
+    # executemany: un solo round-trip invece di uno per URL. Perplexity può
+    # restituire decine di fonti per risposta, e sul pooler la latenza di rete
+    # domina il costo dell'insert.
     with get_engine().begin() as conn:
-        for url in urls:
-            conn.execute(
-                text("INSERT INTO source_mentions (ai_response_id, url) VALUES (:rid, :url)"),
-                {"rid": response_id, "url": url},
-            )
+        conn.execute(
+            text("INSERT INTO source_mentions (ai_response_id, url) VALUES (:rid, :url)"),
+            [{"rid": response_id, "url": url} for url in urls],
+        )
 
 
 def _db_insert_brands(response_id: str, brands: list[dict]) -> None:
     if not brands:
         return
     with get_engine().begin() as conn:
-        for b in brands:
-            conn.execute(
-                text(
-                    "INSERT INTO brand_mentions (ai_response_id, brand_name, position) "
-                    "VALUES (:rid, :name, :pos)"
-                ),
-                {"rid": response_id, "name": b["brand_name"], "pos": b.get("position")},
-            )
+        conn.execute(
+            text(
+                "INSERT INTO brand_mentions (ai_response_id, brand_name, position) "
+                "VALUES (:rid, :name, :pos)"
+            ),
+            [
+                {"rid": response_id, "name": b["brand_name"], "pos": b.get("position")}
+                for b in brands
+            ],
+        )
 
 
 def _db_complete_worker(worker_id: str, status: str, error: Optional[str] = None) -> None:

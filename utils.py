@@ -36,7 +36,20 @@ def get_cookie_manager():
 # ---------------------------------------------------------------------------
 @st.cache_resource
 def get_engine() -> Engine:
-    return create_engine(st.secrets["db"]["url"], pool_pre_ping=True)
+    # NOTE: la connection string punta al pooler Supabase (porta 6543), che è
+    # PgBouncer in transaction mode. psycopg v3 — diventato il driver di default
+    # per gli URL "postgresql://" a partire da SQLAlchemy 2.1 — usa prepared
+    # statement lato server e, dopo 5 esecuzioni della stessa query, li registra
+    # con nomi fissi (_pg3_0, _pg3_1, ...). In transaction mode la connessione
+    # server viene riassegnata a ogni transazione, quindi quei nomi collidono e
+    # Postgres solleva DuplicatePreparedStatement.
+    # prepare_threshold=None disattiva l'auto-prepare: obbligatorio con PgBouncer.
+    return create_engine(
+        st.secrets["db"]["url"],
+        pool_pre_ping=True,
+        pool_recycle=300,
+        connect_args={"prepare_threshold": None},
+    )
 
 
 # ---------------------------------------------------------------------------
