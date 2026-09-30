@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
@@ -320,10 +322,157 @@ def _call_claude(question: str, model: str = "claude-sonnet-4-6") -> tuple[str, 
         return f"ERROR: {exc}", [], model
 
 
+class QuotaExhausted(Exception):
+    """Quota giornaliera esaurita: ritentare nello stesso run è inutile."""
+
+
+class _RateLimiter:
+    """
+    Token bucket condiviso fra i thread del ThreadPoolExecutor.
+
+    Distanzia le richieste in modo uniforme invece di lasciare che i worker
+    partano tutti insieme: con max_workers=4 e nessun limitatore, quattro
+    chiamate partono nello stesso istante e i provider con quote al minuto
+    rispondono 429 già alla prima raffica.
+    """
+
+    def __init__(self, rate_per_minute: float) -> None:
+        self._min_interval = 60.0 / rate_per_minute if rate_per_minute > 0 else 0.0
+        self._lock = threading.Lock()
+        self._next_free = 0.0
+
+    def acquire(self) -> None:
+        if self._min_interval <= 0:
+            return
+        with self._lock:
+            now = time.monotonic()
+            wait = max(0.0, self._next_free - now)
+            self._next_free = max(now, self._next_free) + self._min_interval
+        if wait > 0:
+            time.sleep(wait)
+
+
+_RETRY_STATUS = {429, 500, 502, 503, 504}
+_MAX_ATTEMPTS = 5
+_MAX_BACKOFF = 60.0
+
+# Circuit breaker Gemini, condiviso da tutti i worker.
+_GEMINI_QUOTA_DEAD = threading.Event()
+
+# Limitatore Gemini, costruito pigramente: leggere st.secrets a import-time
+# romperebbe l'import da contesti non-Streamlit (es. scheduler).
+_GEMINI_LIMITER: Optional[_RateLimiter] = None
+_GEMINI_LIMITER_LOCK = threading.Lock()
+
+
+def _gemini_limiter() -> _RateLimiter:
+    """Limitatore condiviso. RPM configurabile: [pipeline] gemini_rpm = 10"""
+    global _GEMINI_LIMITER
+    with _GEMINI_LIMITER_LOCK:
+        if _GEMINI_LIMITER is None:
+            try:
+                rpm = float(_secrets().get("pipeline", {}).get("gemini_rpm", 10))
+            except Exception:
+                rpm = 10.0
+            _GEMINI_LIMITER = _RateLimiter(rpm)
+        return _GEMINI_LIMITER
+
+
+def reset_circuit_breakers() -> None:
+    """Azzera i circuit breaker. Da chiamare all'inizio di ogni run."""
+    _GEMINI_QUOTA_DEAD.clear()
+
+
+def _retry_after_seconds(resp: requests.Response) -> Optional[float]:
+    """Secondi di attesa suggeriti dal server (header Retry-After o RetryInfo)."""
+    raw = resp.headers.get("Retry-After")
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    try:
+        details = resp.json().get("error", {}).get("details", [])
+    except Exception:
+        return None
+    for det in details:
+        if str(det.get("@type", "")).endswith("RetryInfo"):
+            match = re.fullmatch(r"(\d+(?:\.\d+)?)s", str(det.get("retryDelay", "")))
+            if match:
+                return float(match.group(1))
+    return None
+
+
+def _is_daily_quota(resp: requests.Response) -> bool:
+    """True se il 429 è una quota giornaliera (non un limite al minuto)."""
+    try:
+        details = resp.json().get("error", {}).get("details", [])
+    except Exception:
+        return False
+    for det in details:
+        if not str(det.get("@type", "")).endswith("QuotaFailure"):
+            continue
+        for violation in det.get("violations", []):
+            blob = f"{violation.get('quotaId', '')} {violation.get('quotaMetric', '')}"
+            blob = blob.lower().replace("_", "")
+            if "perday" in blob or "daily" in blob:
+                return True
+    return False
+
+
+def _post_with_retry(
+    url: str,
+    *,
+    headers: dict,
+    json: dict,
+    timeout: int,
+    limiter: Optional[_RateLimiter] = None,
+    label: str = "",
+) -> requests.Response:
+    """
+    POST con backoff esponenziale su 429 e 5xx.
+
+    Rispetta il ritardo suggerito dal server quando c'è (Retry-After o
+    RetryInfo di Google), altrimenti usa 2^tentativo con jitter. Una quota
+    giornaliera esaurita solleva QuotaExhausted senza ulteriori tentativi:
+    aspettare non la fa tornare.
+    """
+    last_resp: Optional[requests.Response] = None
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        if limiter is not None:
+            limiter.acquire()
+        resp = requests.post(url, headers=headers, json=json, timeout=timeout)
+        if resp.status_code not in _RETRY_STATUS:
+            return resp
+
+        last_resp = resp
+        if resp.status_code == 429 and _is_daily_quota(resp):
+            raise QuotaExhausted(f"{label}: quota giornaliera esaurita")
+        if attempt == _MAX_ATTEMPTS:
+            break
+
+        wait = _retry_after_seconds(resp)
+        if wait is None:
+            wait = min(_MAX_BACKOFF, 2.0 ** attempt)
+        wait = min(_MAX_BACKOFF, wait + random.uniform(0, 0.5 * wait))
+        logger.warning(
+            "%s HTTP %d — tentativo %d/%d, attendo %.1fs",
+            label, resp.status_code, attempt, _MAX_ATTEMPTS, wait,
+        )
+        time.sleep(wait)
+
+    return last_resp  # type: ignore[return-value]
+
+
 def _call_gemini(question: str, country: str, language: str, model: str | None = None) -> tuple[str, list[str], str]:
     key = _secrets().get("api_keys", {}).get("google", "")
     if not key:
         return "DISABLED", [], ""
+
+    # Circuit breaker: se la quota giornaliera è finita, le domande successive
+    # falliscono subito invece di bruciare 5 tentativi a testa.
+    if _GEMINI_QUOTA_DEAD.is_set():
+        return "ERROR: quota Gemini esaurita per oggi — chiamata saltata", [], (model or GEMINI_MODELS[0])
 
     headers = {
         "Content-Type": "application/json",
@@ -343,12 +492,20 @@ def _call_gemini(question: str, country: str, language: str, model: str | None =
 
     for m in models_to_try:
         try:
-            resp = requests.post(
+            resp = _post_with_retry(
                 f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent",
                 headers=headers,
                 json=payload,
                 timeout=60,
+                limiter=_gemini_limiter(),
+                label=f"Gemini {m}",
             )
+            if resp.status_code == 429:
+                # Retry già esauriti dentro _post_with_retry. Cambiare modello
+                # non aiuta: il limite al minuto è per progetto, non per modello.
+                logger.warning("Gemini %s: 429 dopo %d tentativi — abbandono", m, _MAX_ATTEMPTS)
+                last_exc = Exception(f"429 Too Many Requests dopo {_MAX_ATTEMPTS} tentativi")
+                break
             if resp.status_code == 404:
                 logger.warning("Gemini %s returned 404 — skipping", m)
                 continue
@@ -389,6 +546,11 @@ def _call_gemini(question: str, country: str, language: str, model: str | None =
 
             return full_text, sources, m
 
+        except QuotaExhausted as exc:
+            # Arma il circuit breaker: gli altri worker smettono di provarci.
+            _GEMINI_QUOTA_DEAD.set()
+            logger.error("Gemini: %s — disattivo Gemini per il resto del run", exc)
+            return f"ERROR: {exc}", [], m
         except Exception as exc:
             last_exc = exc
             logger.warning("Gemini %s error: %s", m, exc)
@@ -1123,6 +1285,7 @@ def start_run(
     max_workers: int = int(secrets.get("pipeline", {}).get("max_workers", 4))
     delay: float = float(secrets.get("pipeline", {}).get("request_delay_seconds", 1))
     models = models or {}
+    reset_circuit_breakers()
 
     # --- Load active questions (with keyword text for AIO/AIM) ---
     questions_df = run_query(
@@ -1287,6 +1450,7 @@ def retry_failed_workers(
     secrets = _secrets()
     max_workers: int = int(secrets.get("pipeline", {}).get("max_workers", 4))
     delay: float = float(secrets.get("pipeline", {}).get("request_delay_seconds", 1))
+    reset_circuit_breakers()
 
     # Load failed workers (with keyword for AIO/AIM)
     failed_df = run_query(
